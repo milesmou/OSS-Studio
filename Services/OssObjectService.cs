@@ -531,6 +531,75 @@ public sealed class OssObjectService
         }
     }
 
+    public async Task<IReadOnlyList<string>> ListChildFolderPrefixesAsync(
+        BucketProfile bucket,
+        BucketCredential credential,
+        string prefix,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            return await ListChildFolderPrefixesCoreAsync(
+                bucket,
+                credential,
+                bucket.Endpoint,
+                bucket.RegionCode,
+                prefix,
+                cancellationToken);
+        }
+        catch (OSS.OperationException exception) when (exception.InnerException is OSS.ServiceException)
+        {
+            var serviceException = (OSS.ServiceException)exception.InnerException;
+            if (!TryGetRedirectEndpoint(serviceException, bucket.Endpoint, out var endpoint, out var regionCode))
+            {
+                throw;
+            }
+
+            return await ListChildFolderPrefixesCoreAsync(
+                bucket,
+                credential,
+                endpoint,
+                regionCode,
+                prefix,
+                cancellationToken);
+        }
+    }
+
+    private static async Task<IReadOnlyList<string>> ListChildFolderPrefixesCoreAsync(
+        BucketProfile bucket,
+        BucketCredential credential,
+        string endpoint,
+        string regionCode,
+        string prefix,
+        CancellationToken cancellationToken)
+    {
+        var normalizedPrefix = string.IsNullOrWhiteSpace(prefix)
+            ? string.Empty
+            : prefix.Trim().TrimStart('/').TrimEnd('/') + "/";
+        using var client = CreateClient(bucket, credential, endpoint, regionCode);
+        var request = new OSS.Models.ListObjectsV2Request
+        {
+            Bucket = bucket.Name,
+            Prefix = normalizedPrefix,
+            Delimiter = "/",
+            MaxKeys = 999
+        };
+        AddRequesterPaysHeader(request, bucket);
+        var folders = new HashSet<string>(StringComparer.Ordinal);
+        await foreach (var page in client.ListObjectsV2Paginator(request).IterPageAsync(cancellationToken))
+        {
+            foreach (var commonPrefix in page.CommonPrefixes ?? [])
+            {
+                if (!string.IsNullOrWhiteSpace(commonPrefix.Prefix))
+                {
+                    folders.Add(commonPrefix.Prefix!);
+                }
+            }
+        }
+
+        return folders.OrderBy(prefix => prefix, StringComparer.OrdinalIgnoreCase).ToArray();
+    }
+
     private static async Task<List<ObjectEntry>> ListObjectsCoreAsync(
         BucketProfile bucket,
         BucketCredential credential,

@@ -1195,13 +1195,15 @@ public sealed class OssMainWindow : Window
 
     private static string GetBookmarkDisplayText(DirectoryBookmark bookmark, BucketProfile bucket)
     {
+        if (!string.IsNullOrWhiteSpace(bookmark.DisplayName))
+        {
+            return bookmark.DisplayName.Trim();
+        }
+
         var directoryName = bookmark.Prefix.Length == 0
             ? "根目录"
             : bookmark.Prefix.TrimEnd('/').Split('/').Last();
-        var displayName = string.IsNullOrWhiteSpace(bookmark.DisplayName)
-            ? directoryName
-            : bookmark.DisplayName.Trim();
-        return $"{displayName} · {bucket.Name}";
+        return $"{directoryName} · {bucket.Name}";
     }
 
     private Button FlatButton(string text, Action action)
@@ -1708,44 +1710,75 @@ public sealed class OssMainWindow : Window
         }
 
         var singleEntry = entries.Count == 1 ? entries[0] : null;
-        var prompt = singleEntry is not null
-            ? new TextPromptOverlay(
-                "复制并重命名 OSS 对象",
-                "输入同一 Bucket 内的完整目标路径。修改最后一段即可重命名对象。",
-                "目标 OSS 路径",
-                GetTabState(bucket).CurrentPrefix + singleEntry.Name.TrimEnd('/'),
-                value => TryNormalizeTargetKey(value, bucket, singleEntry.IsFolder, out _, out var error) ? null : error)
-            : new TextPromptOverlay(
-                "复制 OSS 对象",
-                "输入同一 Bucket 内的目标目录，例如 archive/2026/。批量复制时保留原对象名称。",
-                "目标 OSS 目录",
-                GetTabState(bucket).CurrentPrefix,
-                value => TryNormalizeTargetPrefix(value, bucket, out _, out var error) ? null : error);
-        var destination = await prompt.ShowAsync(this);
-        if (destination is null)
-        {
-            return;
-        }
-
-        string targetPath;
-        if (singleEntry is not null)
-        {
-            if (!TryNormalizeTargetKey(destination, bucket, singleEntry.IsFolder, out targetPath, out _))
-            {
-                return;
-            }
-        }
-        else if (!TryNormalizeTargetPrefix(destination, bucket, out targetPath, out _))
-        {
-            return;
-        }
-
         var credential = LoadCredential(bucket.Id);
         if (credential is null)
         {
             SetStatus(bucketId, "未找到 AccessKey 配置");
             return;
         }
+
+        IReadOnlyList<string> folderPrefixes;
+        try
+        {
+            SetStatus(bucketId, "正在加载 OSS 目录树…");
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+            folderPrefixes = await _ossObjectService.ListChildFolderPrefixesAsync(
+                bucket, credential, bucket.Prefix, timeout.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            SetStatus(bucketId, "加载目录树超时，请重试");
+            this.ShowToast("加载目录树超时，请检查网络后重试");
+            return;
+        }
+        catch (Exception exception)
+        {
+            ShowOperationError(bucketId, "加载目录树失败", exception);
+            return;
+        }
+        var overlay = new ObjectDestinationOverlay(
+            singleEntry is null ? "复制 OSS 对象" : "复制并可重命名 OSS 对象",
+            bucket.Name,
+            bucket.Prefix,
+            folderPrefixes,
+            GetTabState(bucket).CurrentPrefix,
+            singleEntry?.Name.TrimEnd('/') ?? $"已选择 {entries.Count} 个对象（保留原名称）",
+            allowRename: singleEntry is not null,
+            confirmText: "复制到此处",
+            loadChildren: (prefix, token) => _ossObjectService.ListChildFolderPrefixesAsync(
+                bucket, credential, prefix, token),
+            validate: (prefix, name) =>
+            {
+                if (singleEntry is null)
+                {
+                    return TryNormalizeTargetPrefix(prefix, bucket, out _, out var prefixError)
+                        ? null
+                        : prefixError;
+                }
+
+                var nameError = ValidateObjectName(name);
+                if (nameError is not null)
+                {
+                    return nameError;
+                }
+                var candidate = prefix + name + (singleEntry.IsFolder ? "/" : string.Empty);
+                if (!TryNormalizeTargetKey(candidate, bucket, singleEntry.IsFolder, out var normalized, out var keyError))
+                {
+                    return keyError;
+                }
+                return singleEntry.IsFolder && normalized.StartsWith(singleEntry.Key, StringComparison.Ordinal)
+                    ? "不能将目录复制到自身内部"
+                    : null;
+            });
+        var destination = await overlay.ShowAsync(this);
+        if (destination is null)
+        {
+            return;
+        }
+
+        var targetPath = singleEntry is null
+            ? destination.DirectoryPrefix
+            : destination.DirectoryPrefix + destination.ObjectName + (singleEntry.IsFolder ? "/" : string.Empty);
 
         var cancellation = TryBeginTransfer(bucketId, "复制");
         if (cancellation is null)
@@ -1791,19 +1824,66 @@ public sealed class OssMainWindow : Window
             return;
         }
 
-        var prompt = new TextPromptOverlay(
-            "移动 OSS 对象",
-            "输入同一 Bucket 内的完整目标路径，最后一段为移动后的对象名称。",
-            "目标 OSS 路径",
-            entry.Key.TrimEnd('/'),
-            value => TryNormalizeMoveTarget(value, bucket, entry, out _, out var error) ? null : error);
-        var destination = await prompt.ShowAsync(this);
-        if (destination is null ||
-            !TryNormalizeMoveTarget(destination, bucket, entry, out var targetKey, out _))
+        var credential = LoadCredential(bucket.Id);
+        if (credential is null)
         {
+            SetStatus(bucketId, "未找到 AccessKey 配置");
             return;
         }
 
+        IReadOnlyList<string> folderPrefixes;
+        try
+        {
+            SetStatus(bucketId, "正在加载 OSS 目录树…");
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+            folderPrefixes = await _ossObjectService.ListChildFolderPrefixesAsync(
+                bucket, credential, bucket.Prefix, timeout.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            SetStatus(bucketId, "加载目录树超时，请重试");
+            this.ShowToast("加载目录树超时，请检查网络后重试");
+            return;
+        }
+        catch (Exception exception)
+        {
+            ShowOperationError(bucketId, "加载目录树失败", exception);
+            return;
+        }
+        var sourceKey = entry.Key.TrimEnd('/');
+        var separator = sourceKey.LastIndexOf('/');
+        var parentPrefix = separator >= 0 ? sourceKey[..(separator + 1)] : string.Empty;
+        var overlay = new ObjectDestinationOverlay(
+            "移动并可重命名 OSS 对象",
+            bucket.Name,
+            bucket.Prefix,
+            folderPrefixes,
+            parentPrefix,
+            entry.Name.TrimEnd('/'),
+            allowRename: true,
+            confirmText: "移动到此处",
+            loadChildren: (prefix, token) => _ossObjectService.ListChildFolderPrefixesAsync(
+                bucket, credential, prefix, token),
+            validate: (prefix, name) =>
+            {
+                var nameError = ValidateObjectName(name);
+                if (nameError is not null)
+                {
+                    return nameError;
+                }
+                var candidate = prefix + name + (entry.IsFolder ? "/" : string.Empty);
+                return TryNormalizeMoveTarget(candidate, bucket, entry, out _, out var error) ? null : error;
+            });
+        var destination = await overlay.ShowAsync(this);
+        if (destination is null)
+        {
+            return;
+        }
+        var candidateTarget = destination.DirectoryPrefix + destination.ObjectName + (entry.IsFolder ? "/" : string.Empty);
+        if (!TryNormalizeMoveTarget(candidateTarget, bucket, entry, out var targetKey, out _))
+        {
+            return;
+        }
         await MoveEntryToAsync(bucket, entry, targetKey, "移动");
     }
 
@@ -2237,6 +2317,19 @@ public sealed class OssMainWindow : Window
         }
 
         return true;
+    }
+
+    private static string? ValidateObjectName(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return "对象名称不能为空";
+        }
+        if (value.IndexOfAny(['/', '\\']) >= 0)
+        {
+            return "对象名称不能包含斜杠";
+        }
+        return value.Trim() is "." or ".." ? "对象名称不能是 . 或 .." : null;
     }
 
     private static bool TryNormalizeTargetKey(
