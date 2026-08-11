@@ -1,6 +1,6 @@
 using Aprillz.MewUI;
-using OSSClient.Services;
-using OSSClient.UI;
+using OSSStudio.Services;
+using OSSStudio.UI;
 
 var stateStore = new WorkspaceStateStore();
 var workspace = stateStore.Load();
