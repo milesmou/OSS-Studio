@@ -100,7 +100,11 @@ git diff -w --check
 ## Git 规范
 
 - 除非用户明确要求，否则不要提交或推送。
-- 用户所说的“提交 git”表示：使用本地仓库执行提交，并自动推送到当前远程分支。
+- 用户所说的“提交 git”表示：直接使用工程本地仓库的 `git` 命令完成检查、暂存、提交，并自动推送到当前远程分支。
+- “提交 git”流程不依赖 GitHub CLI、GitHub 插件或其他发布工具，不要求安装或登录 `gh`，也不创建 Pull Request。
+- 默认命令流程为：`git status`、`git diff -w`、必要验证、`git add -A`、`git commit`、`git push origin <当前分支>`，推送后再次检查分支同步状态。
+- 除非用户明确要求排除，否则“提交 git”包含当前任务产生的全部工程改动以及 `Release/OSS-Studio.exe`。
+- 提交前必须执行凭据泄漏检查，确认没有 AccessKeyId、AccessKeySecret 或其他敏感信息进入暂存区。
 - 提交前检查当前分支、远程地址和变更范围，只提交本任务相关文件。
 - 禁止使用 `git reset --hard`、强制检出或其他会丢失用户修改的命令。
 - 提交信息应简洁说明用户可见结果，例如 `fix: preserve OSS XML models for NativeAOT`。

@@ -6,6 +6,16 @@ namespace OSSStudio.Services;
 
 public sealed class OssObjectService
 {
+    public OssObjectService(int uploadConcurrency = 3, int downloadConcurrency = 3)
+    {
+        UploadConcurrency = Math.Clamp(uploadConcurrency, 1, 8);
+        DownloadConcurrency = Math.Clamp(downloadConcurrency, 1, 8);
+    }
+
+    public int UploadConcurrency { get; set; }
+
+    public int DownloadConcurrency { get; set; }
+
     public async Task<int> UploadPathsAsync(
         BucketProfile bucket,
         BucketCredential credential,
@@ -14,35 +24,16 @@ public sealed class OssObjectService
         IProgress<(int Current, int Total, string Name)>? progress = null,
         CancellationToken cancellationToken = default)
     {
-        var normalizedPrefix = string.IsNullOrEmpty(prefix) || prefix.EndsWith('/') ? prefix : $"{prefix}/";
-        var uploads = new List<(string FilePath, string Key)>();
-        foreach (var path in paths.Distinct(StringComparer.OrdinalIgnoreCase))
-        {
-            if (File.Exists(path))
-            {
-                uploads.Add((path, normalizedPrefix + Path.GetFileName(path)));
-                continue;
-            }
-
-            if (!Directory.Exists(path))
-            {
-                continue;
-            }
-
-            var directory = Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-            var directoryName = Path.GetFileName(directory);
-            foreach (var filePath in Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories))
-            {
-                var relativePath = Path.GetRelativePath(directory, filePath).Replace(Path.DirectorySeparatorChar, '/');
-                uploads.Add((filePath, $"{normalizedPrefix}{directoryName}/{relativePath}"));
-            }
-        }
+        var uploads = await Task.Run(() => CollectUploads(prefix, paths, cancellationToken), cancellationToken);
 
         using var client = CreateClient(bucket, credential);
-        for (var index = 0; index < uploads.Count; index++)
+        var completed = 0;
+        await Parallel.ForEachAsync(uploads, new ParallelOptions
         {
-            var upload = uploads[index];
-            progress?.Report((index + 1, uploads.Count, upload.Key));
+            CancellationToken = cancellationToken,
+            MaxDegreeOfParallelism = UploadConcurrency
+        }, async (upload, token) =>
+        {
             var request = new OSS.Models.PutObjectRequest
             {
                 Bucket = bucket.Name,
@@ -52,10 +43,172 @@ public sealed class OssObjectService
             await client.PutObjectFromFileAsync(
                 request,
                 upload.FilePath,
-                cancellationToken: cancellationToken);
-        }
+                cancellationToken: token);
+            var current = Interlocked.Increment(ref completed);
+            progress?.Report((current, uploads.Count, upload.Key));
+        });
 
         return uploads.Count;
+    }
+
+    public async Task CreateFolderAsync(
+        BucketProfile bucket,
+        BucketCredential credential,
+        string key,
+        CancellationToken cancellationToken = default)
+    {
+        var folderKey = key.EndsWith('/') ? key : $"{key}/";
+        using var client = CreateClient(bucket, credential);
+        using var body = new MemoryStream();
+        var request = new OSS.Models.PutObjectRequest
+        {
+            Bucket = bucket.Name,
+            Key = folderKey,
+            Body = body,
+            ContentLength = 0
+        };
+        AddRequesterPaysHeader(request, bucket);
+        await client.PutObjectAsync(request, cancellationToken: cancellationToken);
+    }
+
+    public async Task<int> CopyEntriesAsync(
+        BucketProfile bucket,
+        BucketCredential credential,
+        IReadOnlyList<ObjectEntry> entries,
+        string destinationPrefix,
+        IProgress<(int Current, int Total, string Name)>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        var normalizedDestination = string.IsNullOrWhiteSpace(destinationPrefix)
+            ? string.Empty
+            : destinationPrefix.EndsWith('/') ? destinationPrefix : $"{destinationPrefix}/";
+        using var client = CreateClient(bucket, credential);
+        var copies = new List<(string SourceKey, string TargetKey)>();
+        foreach (var entry in entries)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!entry.IsFolder)
+            {
+                copies.Add((entry.Key, normalizedDestination + entry.Name));
+                continue;
+            }
+
+            var objects = await ListObjectSummariesAsync(client, bucket, entry.Key, cancellationToken);
+            copies.AddRange(objects
+                .Where(item => !string.IsNullOrWhiteSpace(item.Key))
+                .Select(item =>
+                {
+                    var sourceKey = item.Key!;
+                    var relativeKey = sourceKey.StartsWith(entry.Key, StringComparison.Ordinal)
+                        ? sourceKey[entry.Key.Length..]
+                        : sourceKey;
+                    return (sourceKey, normalizedDestination + entry.Name + relativeKey);
+                }));
+        }
+
+        if (copies.Any(copy => string.Equals(copy.SourceKey, copy.TargetKey, StringComparison.Ordinal)))
+        {
+            throw new InvalidOperationException("目标目录与源目录相同，请填写其它 OSS 目录");
+        }
+
+        var completed = 0;
+        await Parallel.ForEachAsync(copies, new ParallelOptions
+        {
+            CancellationToken = cancellationToken,
+            MaxDegreeOfParallelism = 3
+        }, async (copy, token) =>
+        {
+            var request = new OSS.Models.CopyObjectRequest
+            {
+                Bucket = bucket.Name,
+                Key = copy.TargetKey,
+                SourceBucket = bucket.Name,
+                SourceKey = copy.SourceKey,
+                ForbidOverwrite = true
+            };
+            AddRequesterPaysHeader(request, bucket);
+            await client.CopyObjectAsync(request, cancellationToken: token);
+            var current = Interlocked.Increment(ref completed);
+            progress?.Report((current, copies.Count, copy.TargetKey));
+        });
+        return copies.Count;
+    }
+
+    public async Task<int> CopyEntryAsync(
+        BucketProfile bucket,
+        BucketCredential credential,
+        ObjectEntry entry,
+        string targetKey,
+        IProgress<(int Current, int Total, string Name)>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        using var client = CreateClient(bucket, credential);
+        var copies = new List<(string SourceKey, string TargetKey)>();
+        if (!entry.IsFolder)
+        {
+            copies.Add((entry.Key, targetKey.TrimEnd('/')));
+        }
+        else
+        {
+            var targetPrefix = targetKey.EndsWith('/') ? targetKey : $"{targetKey}/";
+            var objects = await ListObjectSummariesAsync(client, bucket, entry.Key, cancellationToken);
+            copies.AddRange(objects
+                .Where(item => !string.IsNullOrWhiteSpace(item.Key))
+                .Select(item =>
+                {
+                    var sourceKey = item.Key!;
+                    var relativeKey = sourceKey.StartsWith(entry.Key, StringComparison.Ordinal)
+                        ? sourceKey[entry.Key.Length..]
+                        : sourceKey;
+                    return (sourceKey, targetPrefix + relativeKey);
+                }));
+        }
+
+        if (copies.Any(copy => string.Equals(copy.SourceKey, copy.TargetKey, StringComparison.Ordinal)))
+        {
+            throw new InvalidOperationException("目标路径与源对象相同，请修改名称或目标目录");
+        }
+
+        var completed = 0;
+        await Parallel.ForEachAsync(copies, new ParallelOptions
+        {
+            CancellationToken = cancellationToken,
+            MaxDegreeOfParallelism = 3
+        }, async (copy, token) =>
+        {
+            var request = new OSS.Models.CopyObjectRequest
+            {
+                Bucket = bucket.Name,
+                Key = copy.TargetKey,
+                SourceBucket = bucket.Name,
+                SourceKey = copy.SourceKey,
+                ForbidOverwrite = true
+            };
+            AddRequesterPaysHeader(request, bucket);
+            await client.CopyObjectAsync(request, cancellationToken: token);
+            var current = Interlocked.Increment(ref completed);
+            progress?.Report((current, copies.Count, copy.TargetKey));
+        });
+        return copies.Count;
+    }
+
+    public string GetObjectAddress(
+        BucketProfile bucket,
+        BucketCredential credential,
+        string key,
+        DateTime expiresAt)
+    {
+        using var client = CreateClient(bucket, credential);
+        var request = new OSS.Models.GetObjectRequest
+        {
+            Bucket = bucket.Name,
+            Key = key
+        };
+        AddRequesterPaysHeader(request, bucket);
+        var result = client.Presign(request, expiresAt);
+        return string.IsNullOrWhiteSpace(result.Url)
+            ? throw new InvalidOperationException("OSS 未返回对象访问地址")
+            : result.Url;
     }
 
     public async Task<string> GetTextObjectAsync(
@@ -153,16 +306,35 @@ public sealed class OssObjectService
         string destinationDirectory,
         IProgress<(int Current, int Total, string Name)>? progress = null,
         CancellationToken cancellationToken = default)
+        => await DownloadFolderCoreAsync(
+            bucket,
+            credential,
+            prefix,
+            destinationDirectory,
+            DownloadConcurrency,
+            progress,
+            cancellationToken);
+
+    private async Task<int> DownloadFolderCoreAsync(
+        BucketProfile bucket,
+        BucketCredential credential,
+        string prefix,
+        string destinationDirectory,
+        int concurrency,
+        IProgress<(int Current, int Total, string Name)>? progress = null,
+        CancellationToken cancellationToken = default)
     {
         using var client = CreateClient(bucket, credential);
         var objects = await ListObjectSummariesAsync(client, bucket, prefix, cancellationToken);
         var folderName = SanitizePathSegment(prefix.TrimEnd('/').Split('/').LastOrDefault() ?? bucket.Name);
         var targetRoot = Path.GetFullPath(Path.Combine(destinationDirectory, folderName));
         Directory.CreateDirectory(targetRoot);
+        var reservedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var downloads = new List<(string Key, string FilePath, string RelativeKey)>();
 
-        var downloaded = 0;
         foreach (var item in objects)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var key = item.Key ?? string.Empty;
             if (key.Length == 0 || key.EndsWith('/'))
             {
@@ -185,15 +357,100 @@ public sealed class OssObjectService
                 throw new IOException($"对象路径超出下载目录：{key}");
             }
 
-            Directory.CreateDirectory(Path.GetDirectoryName(filePath)!);
-            var request = new OSS.Models.GetObjectRequest { Bucket = bucket.Name, Key = key };
-            AddRequesterPaysHeader(request, bucket);
-            await client.GetObjectToFileAsync(request, filePath, cancellationToken: cancellationToken);
-            downloaded++;
-            progress?.Report((downloaded, objects.Count, relativeKey));
+            filePath = GetUniqueDownloadPath(filePath, reservedPaths);
+            downloads.Add((key, filePath, relativeKey));
         }
 
+        var downloaded = 0;
+        await Parallel.ForEachAsync(
+            downloads,
+            new ParallelOptions
+            {
+                MaxDegreeOfParallelism = Math.Clamp(concurrency, 1, 8),
+                CancellationToken = cancellationToken
+            },
+            async (download, token) =>
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(download.FilePath)!);
+                var request = new OSS.Models.GetObjectRequest { Bucket = bucket.Name, Key = download.Key };
+                AddRequesterPaysHeader(request, bucket);
+                await client.GetObjectToFileAsync(request, download.FilePath, cancellationToken: token);
+                var current = Interlocked.Increment(ref downloaded);
+                progress?.Report((current, downloads.Count, download.RelativeKey));
+            });
+
         return downloaded;
+    }
+
+    public async Task<int> DownloadEntriesAsync(
+        BucketProfile bucket,
+        BucketCredential credential,
+        IReadOnlyList<ObjectEntry> entries,
+        string destinationDirectory,
+        IProgress<(int Current, int Total, string Name)>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        var completed = 0;
+        var reservedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var reservedPathsLock = new object();
+        await Parallel.ForEachAsync(
+            entries,
+            new ParallelOptions
+            {
+                MaxDegreeOfParallelism = DownloadConcurrency,
+                CancellationToken = cancellationToken
+            },
+            async (entry, token) =>
+            {
+                if (entry.IsFolder)
+                {
+                    await DownloadFolderCoreAsync(
+                        bucket,
+                        credential,
+                        entry.Key,
+                        destinationDirectory,
+                        1,
+                        cancellationToken: token);
+                }
+                else
+                {
+                    var requestedPath = Path.GetFullPath(Path.Combine(
+                        destinationDirectory,
+                        SanitizePathSegment(entry.Name)));
+                    string filePath;
+                    lock (reservedPathsLock)
+                    {
+                        filePath = GetUniqueDownloadPath(requestedPath, reservedPaths);
+                    }
+
+                    await DownloadObjectAsync(bucket, credential, entry.Key, filePath, token);
+                }
+
+                var current = Interlocked.Increment(ref completed);
+                progress?.Report((current, entries.Count, entry.Name));
+            });
+
+        return completed;
+    }
+
+    public async Task<int> DeleteEntriesAsync(
+        BucketProfile bucket,
+        BucketCredential credential,
+        IReadOnlyList<ObjectEntry> entries,
+        IProgress<(int Current, int Total, string Name)>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        var deleted = 0;
+        foreach (var entry in entries)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            deleted += entry.IsFolder
+                ? await DeleteFolderAsync(bucket, credential, entry.Key, cancellationToken)
+                : await DeleteSingleAsync(bucket, credential, entry.Key, cancellationToken);
+            progress?.Report((deleted, entries.Count, entry.Name));
+        }
+
+        return deleted;
     }
 
     public async Task DeleteObjectAsync(
@@ -396,6 +653,70 @@ public sealed class OssObjectService
         }
 
         return string.IsNullOrWhiteSpace(value) ? "_" : value;
+    }
+
+    private static List<(string FilePath, string Key)> CollectUploads(
+        string prefix,
+        IReadOnlyList<string> paths,
+        CancellationToken cancellationToken)
+    {
+        var normalizedPrefix = string.IsNullOrEmpty(prefix) || prefix.EndsWith('/') ? prefix : $"{prefix}/";
+        var uploads = new List<(string FilePath, string Key)>();
+        foreach (var path in paths.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (File.Exists(path))
+            {
+                uploads.Add((path, normalizedPrefix + Path.GetFileName(path)));
+                continue;
+            }
+
+            if (!Directory.Exists(path))
+            {
+                continue;
+            }
+
+            var directory = Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            var directoryName = Path.GetFileName(directory);
+            foreach (var filePath in Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var relativePath = Path.GetRelativePath(directory, filePath).Replace(Path.DirectorySeparatorChar, '/');
+                uploads.Add((filePath, $"{normalizedPrefix}{directoryName}/{relativePath}"));
+            }
+        }
+
+        return uploads;
+    }
+
+    private async Task<int> DeleteSingleAsync(
+        BucketProfile bucket,
+        BucketCredential credential,
+        string key,
+        CancellationToken cancellationToken)
+    {
+        await DeleteObjectAsync(bucket, credential, key, cancellationToken);
+        return 1;
+    }
+
+    private static string GetUniqueDownloadPath(string requestedPath, HashSet<string> reservedPaths)
+    {
+        if (!File.Exists(requestedPath) && !Directory.Exists(requestedPath) && reservedPaths.Add(requestedPath))
+        {
+            return requestedPath;
+        }
+
+        var directory = Path.GetDirectoryName(requestedPath)!;
+        var extension = Path.GetExtension(requestedPath);
+        var name = Path.GetFileNameWithoutExtension(requestedPath);
+        for (var suffix = 2; ; suffix++)
+        {
+            var candidate = Path.Combine(directory, $"{name} ({suffix}){extension}");
+            if (!File.Exists(candidate) && !Directory.Exists(candidate) && reservedPaths.Add(candidate))
+            {
+                return candidate;
+            }
+        }
     }
 
     private static bool TryGetRedirectEndpoint(

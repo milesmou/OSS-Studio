@@ -5,18 +5,31 @@ namespace OSSStudio.UI;
 
 public sealed class ConfirmOverlay : ContentControl
 {
-    private static readonly Color Surface = Color.FromHex("#F4F5F3");
-    private static readonly Color BorderColor = Color.FromHex("#CFD9D9");
-    private static readonly Color MutedText = Color.FromHex("#687982");
-    private static readonly Color Amber = Color.FromHex("#C5903D");
-    private static readonly Color Coral = Color.FromHex("#A86F67");
+    private readonly Color Surface;
+    private readonly Color PanelSurface;
+    private readonly Color BorderColor;
+    private readonly Color MutedText;
+    private readonly Color Amber;
+    private readonly Color Coral;
 
     private readonly TaskCompletionSource<bool> _completion = new();
     private Window? _owner;
     private OssMainWindow? _modalOwner;
 
-    public ConfirmOverlay(string title, string message, string detail, string confirmText = "删除")
+    public ConfirmOverlay(
+        string title,
+        string message,
+        string detail,
+        string confirmText = "删除",
+        string cancelText = "取消")
     {
+        var palette = AppThemePalette.Current;
+        Surface = palette.Surface;
+        PanelSurface = palette.PanelSurface;
+        BorderColor = palette.Border;
+        MutedText = palette.MutedText;
+        Amber = palette.Amber;
+        Coral = palette.Coral;
         Background = Color.Black.WithAlpha(105);
         HorizontalAlignment = HorizontalAlignment.Stretch;
         VerticalAlignment = VerticalAlignment.Stretch;
@@ -33,7 +46,7 @@ public sealed class ConfirmOverlay : ContentControl
                 new DockPanel()
                     .LastChildFill()
                     .Children(
-                        BuildFooter(confirmText).DockBottom(),
+                        BuildFooter(confirmText, cancelText).DockBottom(),
                         new StackPanel()
                             .Horizontal()
                             .Spacing(14)
@@ -71,11 +84,11 @@ public sealed class ConfirmOverlay : ContentControl
         return _completion.Task;
     }
 
-    private FrameworkElement BuildFooter(string confirmText)
+    private FrameworkElement BuildFooter(string confirmText, string cancelText)
     {
         return new Border()
             .Padding(18, 12)
-            .Background(Color.FromHex("#EEF2F1"))
+            .Background(PanelSurface)
             .BorderBrush(BorderColor)
             .BorderThickness(new Thickness(0, 1, 0, 0))
             .Child(
@@ -85,11 +98,11 @@ public sealed class ConfirmOverlay : ContentControl
                     .HorizontalAlignment(HorizontalAlignment.Right)
                     .Children(
                         new Button()
-                            .Content("取消", accessKey: false)
+                            .Content(cancelText, accessKey: false)
                             .StyleName(BuiltInStyles.FlatButton)
                             .Padding(16, 7)
                             .OnClick(() => Complete(false))
-                            .WithFeedback("取消当前操作", Color.White.WithAlpha(0), BorderColor.WithAlpha(75), BorderColor),
+                            .WithFeedback(cancelText, Color.White.WithAlpha(0), BorderColor.WithAlpha(75), BorderColor),
                         new Button()
                             .Content(confirmText, accessKey: false)
                             .Padding(16, 7)

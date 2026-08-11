@@ -63,6 +63,10 @@ public sealed class WorkspaceStateStore
 
     private static void Normalize(WorkspaceState state)
     {
+        state.Bookmarks ??= [];
+        state.UploadConcurrency = state.UploadConcurrency is >= 1 and <= 8 ? state.UploadConcurrency : 3;
+        state.DownloadConcurrency = state.DownloadConcurrency is >= 1 and <= 8 ? state.DownloadConcurrency : 3;
+        state.ThemeMode = state.ThemeMode is "System" or "Light" or "Dark" ? state.ThemeMode : "Light";
         state.Buckets.RemoveAll(bucket => bucket.Id is
             "bucket-prod-images" or
             "bucket-web-static" or
@@ -73,6 +77,24 @@ public sealed class WorkspaceStateStore
 
         var bucketIds = state.Buckets.Select(bucket => bucket.Id).ToHashSet();
         state.OpenBucketIds.RemoveAll(id => !bucketIds.Contains(id));
+        state.Bookmarks.RemoveAll(bookmark => !bucketIds.Contains(bookmark.BucketId));
+        for (var index = 0; index < state.Bookmarks.Count; index++)
+        {
+            var bookmark = state.Bookmarks[index];
+            var prefix = string.IsNullOrWhiteSpace(bookmark.Prefix)
+                ? string.Empty
+                : bookmark.Prefix.Trim().TrimStart('/').TrimEnd('/') + "/";
+            state.Bookmarks[index] = bookmark with
+            {
+                Prefix = prefix,
+                DisplayName = bookmark.DisplayName ?? string.Empty
+            };
+        }
+        var duplicateBookmarks = state.Bookmarks
+            .GroupBy(bookmark => (bookmark.BucketId, bookmark.Prefix))
+            .SelectMany(group => group.Skip(1))
+            .ToHashSet();
+        state.Bookmarks.RemoveAll(duplicateBookmarks.Contains);
 
         if (state.OpenBucketIds.Count == 0)
         {

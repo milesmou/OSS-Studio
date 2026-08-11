@@ -7,4 +7,12 @@ public sealed class WorkspaceState
     public List<string> OpenBucketIds { get; init; } = [];
 
     public string ActiveBucketId { get; set; } = string.Empty;
+
+    public List<DirectoryBookmark> Bookmarks { get; set; } = [];
+
+    public int UploadConcurrency { get; set; } = 3;
+
+    public int DownloadConcurrency { get; set; } = 3;
+
+    public string ThemeMode { get; set; } = "Light";
 }

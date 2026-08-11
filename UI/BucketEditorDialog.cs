@@ -6,11 +6,13 @@ namespace OSSStudio.UI;
 
 public sealed class BucketEditorDialog : ContentControl
 {
-    private static readonly Color Surface = Color.FromHex("#F4F5F3");
-    private static readonly Color MutedText = Color.FromHex("#687982");
-    private static readonly Color BorderColor = Color.FromHex("#CFD9D9");
-    private static readonly Color Teal = Color.FromHex("#438F86");
-    private static readonly Color Coral = Color.FromHex("#A86F67");
+    private readonly Color Surface;
+    private readonly Color HeaderSurface;
+    private readonly Color PanelSurface;
+    private readonly Color MutedText;
+    private readonly Color BorderColor;
+    private readonly Color Teal;
+    private readonly Color Coral;
 
     private readonly TextBox _accessKeyIdBox = new();
     private readonly PasswordBox _accessKeySecretBox = new();
@@ -34,6 +36,14 @@ public sealed class BucketEditorDialog : ContentControl
 
     public BucketEditorDialog(BucketProfile? bucket, BucketCredential? credential, Func<string, bool> nameExists)
     {
+        var palette = AppThemePalette.Current;
+        Surface = palette.Surface;
+        HeaderSurface = palette.HeaderSurface;
+        PanelSurface = palette.PanelSurface;
+        MutedText = palette.MutedText;
+        BorderColor = palette.Border;
+        Teal = palette.Teal;
+        Coral = palette.Coral;
         _nameExists = nameExists;
         _bucketId = bucket?.Id ?? $"bucket-{Guid.NewGuid():N}";
         _submitText = bucket is null ? "添加" : "保存";
@@ -123,7 +133,7 @@ public sealed class BucketEditorDialog : ContentControl
     {
         return new Border()
             .Padding(22, 16)
-            .Background(Color.FromHex("#E7ECEC"))
+            .Background(HeaderSurface)
             .BorderBrush(BorderColor)
             .BorderThickness(new Thickness(0, 0, 0, 1))
             .Child(
@@ -152,7 +162,7 @@ public sealed class BucketEditorDialog : ContentControl
             .Children(
                 new Border()
                     .Padding(10, 0)
-                    .Background(Color.FromHex("#E7ECEC"))
+                    .Background(HeaderSurface)
                     .BorderBrush(BorderColor)
                     .BorderThickness(new Thickness(1, 1, 0, 1))
                     .Child(new TextBlock().Text("oss://").Foreground(MutedText).CenterVertical()),
@@ -179,7 +189,7 @@ public sealed class BucketEditorDialog : ContentControl
     {
         return new Border()
             .Padding(22, 13)
-            .Background(Color.FromHex("#EEF2F1"))
+            .Background(PanelSurface)
             .BorderBrush(BorderColor)
             .BorderThickness(new Thickness(0, 1, 0, 0))
             .Child(
@@ -209,7 +219,7 @@ public sealed class BucketEditorDialog : ContentControl
                                 Teal.WithAlpha(88))));
     }
 
-    private static FrameworkElement FormRow(string label, FrameworkElement input)
+    private FrameworkElement FormRow(string label, FrameworkElement input)
     {
         input.Height = 34;
         return new Grid()

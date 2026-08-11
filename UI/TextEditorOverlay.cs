@@ -5,10 +5,12 @@ namespace OSSStudio.UI;
 
 public sealed class TextEditorOverlay : ContentControl
 {
-    private static readonly Color Surface = Color.FromHex("#F4F5F3");
-    private static readonly Color BorderColor = Color.FromHex("#CFD9D9");
-    private static readonly Color MutedText = Color.FromHex("#687982");
-    private static readonly Color Teal = Color.FromHex("#438F86");
+    private readonly Color Surface;
+    private readonly Color HeaderSurface;
+    private readonly Color PanelSurface;
+    private readonly Color BorderColor;
+    private readonly Color MutedText;
+    private readonly Color Teal;
 
     private readonly MultiLineTextBox _editor;
     private readonly TaskCompletionSource<string?> _completion = new();
@@ -17,6 +19,13 @@ public sealed class TextEditorOverlay : ContentControl
 
     public TextEditorOverlay(string bucketName, string fileName, string objectKey, string content)
     {
+        var palette = AppThemePalette.Current;
+        Surface = palette.Surface;
+        HeaderSurface = palette.HeaderSurface;
+        PanelSurface = palette.PanelSurface;
+        BorderColor = palette.Border;
+        MutedText = palette.MutedText;
+        Teal = palette.Teal;
         Background = Color.Black.WithAlpha(105);
         HorizontalAlignment = HorizontalAlignment.Stretch;
         VerticalAlignment = VerticalAlignment.Stretch;
@@ -64,11 +73,11 @@ public sealed class TextEditorOverlay : ContentControl
         return _completion.Task;
     }
 
-    private static FrameworkElement BuildHeader(string bucketName, string fileName, string objectKey)
+    private FrameworkElement BuildHeader(string bucketName, string fileName, string objectKey)
     {
         return new Border()
             .Padding(18, 12)
-            .Background(Color.FromHex("#E7ECEC"))
+            .Background(HeaderSurface)
             .BorderBrush(BorderColor)
             .BorderThickness(new Thickness(0, 0, 0, 1))
             .Child(
@@ -85,7 +94,7 @@ public sealed class TextEditorOverlay : ContentControl
         var transparent = Color.White.WithAlpha(0);
         return new Border()
             .Padding(18, 11)
-            .Background(Color.FromHex("#EEF2F1"))
+            .Background(PanelSurface)
             .BorderBrush(BorderColor)
             .BorderThickness(new Thickness(0, 1, 0, 0))
             .Child(
