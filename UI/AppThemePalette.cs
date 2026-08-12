@@ -50,23 +50,23 @@ internal static class AppThemePalette
                 Purple: Color.FromHex("#B09DCE"),
                 Coral: Color.FromHex("#D7978E"))
             : new ThemePalette(
-                WindowBackground: Color.FromHex("#E9EEEE"),
-                Surface: Color.FromHex("#F4F5F3"),
-                SidebarSurface: Color.FromHex("#EEF2F1"),
-                HeaderSurface: Color.FromHex("#E7ECEC"),
-                PanelSurface: Color.FromHex("#EEF2F1"),
-                Border: Color.FromHex("#CFD9D9"),
-                RowDivider: Color.FromHex("#D6E0DE"),
-                ObjectListSurface: Color.FromHex("#FFFFFF"),
-                ObjectRowHover: Color.FromHex("#E6F0EE"),
-                ObjectRowSelected: Color.FromHex("#C9DFDB"),
-                PrimaryText: Color.FromHex("#304642"),
-                MutedText: Color.FromHex("#687982"),
-                Teal: Color.FromHex("#438F86"),
-                Amber: Color.FromHex("#C5903D"),
-                Blue: Color.FromHex("#6384AD"),
-                Purple: Color.FromHex("#7D6A9D"),
-                Coral: Color.FromHex("#A86F67"));
+                WindowBackground: Color.FromHex("#EFF6F4"),
+                Surface: Color.FromHex("#F7FAF9"),
+                SidebarSurface: Color.FromHex("#E3EEEB"),
+                HeaderSurface: Color.FromHex("#E7F1EF"),
+                PanelSurface: Color.FromHex("#E8F2EF"),
+                Border: Color.FromHex("#C9DDD8"),
+                RowDivider: Color.FromHex("#D6E5E1"),
+                ObjectListSurface: Color.FromHex("#F8FAF9"),
+                ObjectRowHover: Color.FromHex("#DFEEEA"),
+                ObjectRowSelected: Color.FromHex("#C5E0DA"),
+                PrimaryText: Color.FromHex("#243632"),
+                MutedText: Color.FromHex("#617874"),
+                Teal: Color.FromHex("#39847E"),
+                Amber: Color.FromHex("#B2874B"),
+                Blue: Color.FromHex("#5F789D"),
+                Purple: Color.FromHex("#796F96"),
+                Coral: Color.FromHex("#B66F64"));
 
     private static bool UsesDarkPalette(string themeMode)
     {

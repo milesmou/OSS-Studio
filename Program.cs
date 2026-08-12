@@ -28,11 +28,11 @@ internal static class Program
 
         var lightSeed = new ThemeSeed
         {
-            WindowBackground = Color.FromHex("#E9EEEE"),
-            WindowText = Color.FromHex("#34434E"),
-            ControlBackground = Color.FromHex("#F4F5F3"),
-            ButtonFace = Color.FromHex("#E7EBE9"),
-            ButtonDisabledBackground = Color.FromHex("#D4DAD8")
+            WindowBackground = Color.FromHex("#EFF6F4"),
+            WindowText = Color.FromHex("#243632"),
+            ControlBackground = Color.FromHex("#F7FAF9"),
+            ButtonFace = Color.FromHex("#E3EEEB"),
+            ButtonDisabledBackground = Color.FromHex("#D1DEDA")
         };
 
         OssMainWindow? mainWindow = null;
@@ -40,7 +40,7 @@ internal static class Program
             .UseWin32()
             .UseDirect2D()
             .UseTheme(initialTheme)
-            .UseAccent(Color.FromHex("#438F86"))
+            .UseAccent(Color.FromHex("#39847E"))
             .UseSeed(lightSeed, ThemeSeed.DefaultDark)
             .BuildMainWindow(() =>
             {
