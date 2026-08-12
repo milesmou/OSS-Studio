@@ -12,6 +12,10 @@ internal enum FilePreviewKind
 
 internal sealed class FilePreviewOverlay : ContentControl
 {
+    private const double MinimumImageScale = 0.05;
+    private const double MaximumImageScale = 8;
+    private const double ImageZoomStep = 1.1;
+
     private readonly ContentControl _body = new();
     private readonly ContentControl _footer = new();
     private readonly TextBlock _status = new();
@@ -31,6 +35,11 @@ internal sealed class FilePreviewOverlay : ContentControl
     private readonly string _fileName;
     private OssMainWindow? _owner;
     private MultiLineTextBox? _editor;
+    private Image? _previewImage;
+    private ImageSource? _previewImageSource;
+    private ScrollViewer? _imageScrollViewer;
+    private double _imageScale = 1;
+    private bool _imageScaleInitialized;
     private string _originalText = string.Empty;
 
     public FilePreviewOverlay(
@@ -156,22 +165,31 @@ internal sealed class FilePreviewOverlay : ContentControl
         {
             var bytes = await _loadImage(_cancellation.Token);
             var source = ImageSource.FromBytes(bytes);
+            _previewImageSource = source;
+            _previewImage = new Image
+            {
+                Source = source,
+                StretchMode = Stretch.Uniform,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            _imageScrollViewer = new ScrollViewer
+            {
+                Content = _previewImage,
+                VerticalScroll = ScrollMode.Auto,
+                HorizontalScroll = ScrollMode.Auto,
+                AutoHideScrollBars = true
+            };
+            _imageScrollViewer.SizeChanged += _ => InitializeImageScaleToViewport();
+            _imageScrollViewer.MouseWheel += ZoomImage;
             _body.Content = new Border()
                 .Margin(16, 12)
                 .Background(_panelSurface)
                 .BorderBrush(_borderColor)
                 .BorderThickness(1)
                 .Padding(12)
-                .Child(new Image
-                {
-                    Source = source,
-                    StretchMode = Stretch.Uniform,
-                    HorizontalAlignment = HorizontalAlignment.Stretch,
-                    VerticalAlignment = VerticalAlignment.Stretch
-                });
-            _status.Text = source.PixelWidth > 0 && source.PixelHeight > 0
-                ? $"{source.PixelWidth} × {source.PixelHeight}"
-                : string.Empty;
+                .Child(_imageScrollViewer);
+            UpdateImageStatus();
             SetCloseFooter();
         }
         catch (OperationCanceledException) when (_cancellation.IsCancellationRequested)
@@ -181,6 +199,56 @@ internal sealed class FilePreviewOverlay : ContentControl
         {
             ShowLoadError($"图片预览失败：{exception.Message}");
         }
+    }
+
+    private void InitializeImageScaleToViewport()
+    {
+        if (_imageScaleInitialized || _previewImageSource is not { PixelWidth: > 0, PixelHeight: > 0 } source ||
+            _imageScrollViewer is not { ViewportWidth: > 0, ViewportHeight: > 0 } scrollViewer)
+        {
+            return;
+        }
+
+        _imageScale = Math.Min(1, Math.Min(
+            scrollViewer.ViewportWidth / source.PixelWidth,
+            scrollViewer.ViewportHeight / source.PixelHeight));
+        _imageScaleInitialized = true;
+        ApplyImageScale();
+    }
+
+    private void ZoomImage(MouseWheelEventArgs eventArgs)
+    {
+        if (_previewImageSource is not { PixelWidth: > 0, PixelHeight: > 0 } || eventArgs.Delta.Y == 0)
+        {
+            return;
+        }
+
+        _imageScaleInitialized = true;
+        _imageScale = Math.Clamp(
+            _imageScale * Math.Pow(ImageZoomStep, eventArgs.Delta.Y),
+            MinimumImageScale,
+            MaximumImageScale);
+        ApplyImageScale();
+        eventArgs.Handled = true;
+    }
+
+    private void ApplyImageScale()
+    {
+        if (_previewImage is null || _previewImageSource is not { PixelWidth: > 0, PixelHeight: > 0 } source)
+        {
+            return;
+        }
+
+        _previewImage.Width = source.PixelWidth * _imageScale;
+        _previewImage.Height = source.PixelHeight * _imageScale;
+        UpdateImageStatus();
+    }
+
+    private void UpdateImageStatus()
+    {
+        _status.Text = _previewImageSource is { PixelWidth: > 0, PixelHeight: > 0 } source
+            ? $"{source.PixelWidth} × {source.PixelHeight}  ·  {_imageScale:P0}  ·  滚轮缩放"
+            : string.Empty;
     }
 
     private void ShowUnsupported()
