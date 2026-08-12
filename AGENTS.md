@@ -23,19 +23,21 @@
 
 ## 开发与验证
 
-在仓库根目录执行：
+涉及源码、项目配置、资源文件或构建与发布脚本的改动，必须在仓库根目录执行：
 
 ```powershell
 dotnet build .\OSS-Studio.csproj --no-restore --output .\artifacts\verify
 ```
 
-每次改动完成后，无论改动类型，都必须执行：
+并且必须执行：
 
 ```powershell
 .\publish.cmd
 ```
 
-只有 `publish.cmd` 执行成功，才能将本次改动视为完成；若发布失败，必须修复失败原因或明确向用户报告阻塞，不得跳过发布验证。
+只有 `publish.cmd` 执行成功，才能将此类改动视为完成；若发布失败，必须修复失败原因或明确向用户报告阻塞，不得跳过发布验证。
+
+如果本次仅修改文档、Agent 规范或其他不会影响程序构建与运行结果的文本文件，则无需执行 `dotnet build` 和 `publish.cmd`。一旦改动中包含任何代码、项目配置、资源文件或构建与发布脚本，仍须执行上述完整验证。
 
 发布结果应位于 `Release/OSS-Studio.exe`，且 `Release` 目录只包含该自包含单文件。发布参数要求：
 

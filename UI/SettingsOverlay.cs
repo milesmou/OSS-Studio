@@ -4,8 +4,9 @@ using Aprillz.MewUI.Controls;
 namespace OSSStudio.UI;
 
 internal sealed record AppSettingsResult(
-    int UploadConcurrency,
-    int DownloadConcurrency,
+    int TransferConcurrency,
+    int RequestTimeoutSeconds,
+    int RetryCount,
     string ThemeMode);
 
 internal sealed class SettingsOverlay : ContentControl
@@ -28,13 +29,30 @@ internal sealed class SettingsOverlay : ContentControl
         new("浅色", "Light"),
         new("深色", "Dark")
     ];
-    private readonly ComboBox _uploadConcurrencyBox = new();
-    private readonly ComboBox _downloadConcurrencyBox = new();
+    private readonly List<NumberOption> _timeoutOptions =
+    [
+        new(10, "10 秒"),
+        new(20, "20 秒"),
+        new(30, "30 秒"),
+        new(60, "60 秒"),
+        new(120, "120 秒"),
+        new(300, "300 秒")
+    ];
+    private readonly List<NumberOption> _retryOptions = Enumerable.Range(0, 6)
+        .Select(value => new NumberOption(value, value == 0 ? "不重试" : $"{value} 次"))
+        .ToList();
+    private readonly ComboBox _transferConcurrencyBox = new();
+    private readonly ComboBox _requestTimeoutBox = new();
+    private readonly ComboBox _retryCountBox = new();
     private readonly ComboBox _themeModeBox = new();
     private readonly TaskCompletionSource<AppSettingsResult?> _completion = new();
     private OssMainWindow? _owner;
 
-    public SettingsOverlay(int uploadConcurrency, int downloadConcurrency, string themeMode)
+    public SettingsOverlay(
+        int transferConcurrency,
+        int requestTimeoutSeconds,
+        int retryCount,
+        string themeMode)
     {
         var palette = AppThemePalette.Current;
         Surface = palette.Surface;
@@ -45,13 +63,17 @@ internal sealed class SettingsOverlay : ContentControl
         PrimaryText = palette.PrimaryText;
         SettingSurface = palette.ObjectListSurface;
         Teal = palette.Teal;
-        _uploadConcurrencyBox
+        _transferConcurrencyBox
             .Items(_concurrencyOptions, item => item.DisplayName, item => item.Value)
-            .SelectedIndex(Math.Clamp(uploadConcurrency, 1, 8) - 1)
+            .SelectedIndex(Math.Clamp(transferConcurrency, 1, 8) - 1)
             .Width(150);
-        _downloadConcurrencyBox
-            .Items(_concurrencyOptions, item => item.DisplayName, item => item.Value)
-            .SelectedIndex(Math.Clamp(downloadConcurrency, 1, 8) - 1)
+        _requestTimeoutBox
+            .Items(_timeoutOptions, item => item.DisplayName, item => item.Value)
+            .SelectedIndex(Math.Max(0, _timeoutOptions.FindIndex(item => item.Value == requestTimeoutSeconds)))
+            .Width(150);
+        _retryCountBox
+            .Items(_retryOptions, item => item.DisplayName, item => item.Value)
+            .SelectedIndex(Math.Clamp(retryCount, 0, 5))
             .Width(150);
         _themeModeBox
             .Items(_themeOptions, item => item.DisplayName, item => item.Value)
@@ -103,15 +125,21 @@ internal sealed class SettingsOverlay : ContentControl
             .Spacing(12)
             .Margin(20, 18)
             .Children(
-                SectionTitle("传输并发"),
+                SectionTitle("传输"),
                 SettingRow(
-                    "上传并发数",
-                    "同时上传的文件数量。网络或设备负载较高时可适当降低。",
-                    _uploadConcurrencyBox),
+                    "上传下载并发数",
+                    "同时上传或下载的文件数量。网络或设备负载较高时可适当降低。",
+                    _transferConcurrencyBox),
+                new Border().Height(1).Background(BorderColor).Margin(0, 4),
+                SectionTitle("网络请求"),
                 SettingRow(
-                    "下载并发数",
-                    "同时下载的文件数量。目录下载和批量下载均使用此设置。",
-                    _downloadConcurrencyBox),
+                    "超时时间",
+                    "连接、读取或写入持续超过该时间后，本次请求将判定为超时。",
+                    _requestTimeoutBox),
+                SettingRow(
+                    "重试次数",
+                    "遇到可恢复的网络错误时自动重试；不包含首次请求。",
+                    _retryCountBox),
                 new Border().Height(1).Background(BorderColor).Margin(0, 4),
                 SectionTitle("外观"),
                 SettingRow(
@@ -119,7 +147,7 @@ internal sealed class SettingsOverlay : ContentControl
                     "可跟随 Windows 外观设置，或固定使用浅色、深色主题。",
                     _themeModeBox),
                 new TextBlock()
-                    .Text("建议并发数为 3；设置会用于之后开始的传输任务。")
+                    .Text("建议并发数为 3、超时 60 秒、重试 5 次；设置会用于之后发起的请求。")
                     .Foreground(MutedText)
                     .FontSize(12));
 
@@ -177,10 +205,15 @@ internal sealed class SettingsOverlay : ContentControl
 
     private void Save()
     {
-        var uploadConcurrency = (_uploadConcurrencyBox.SelectedItem as ConcurrencyOption)?.Value ?? 3;
-        var downloadConcurrency = (_downloadConcurrencyBox.SelectedItem as ConcurrencyOption)?.Value ?? 3;
+        var transferConcurrency = (_transferConcurrencyBox.SelectedItem as ConcurrencyOption)?.Value ?? 3;
+        var requestTimeoutSeconds = (_requestTimeoutBox.SelectedItem as NumberOption)?.Value ?? 60;
+        var retryCount = (_retryCountBox.SelectedItem as NumberOption)?.Value ?? 5;
         var themeMode = (_themeModeBox.SelectedItem as ThemeOption)?.Value ?? "Light";
-        Complete(new AppSettingsResult(uploadConcurrency, downloadConcurrency, themeMode));
+        Complete(new AppSettingsResult(
+            transferConcurrency,
+            requestTimeoutSeconds,
+            retryCount,
+            themeMode));
     }
 
     private void Complete(AppSettingsResult? result)
@@ -194,6 +227,8 @@ internal sealed class SettingsOverlay : ContentControl
     }
 
     private sealed record ConcurrencyOption(int Value, string DisplayName);
+
+    private sealed record NumberOption(int Value, string DisplayName);
 
     private sealed record ThemeOption(string DisplayName, string Value);
 }

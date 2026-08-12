@@ -14,5 +14,9 @@ public sealed class WorkspaceState
 
     public int DownloadConcurrency { get; set; } = 3;
 
+    public int RequestTimeoutSeconds { get; set; } = 60;
+
+    public int RetryCount { get; set; } = 5;
+
     public string ThemeMode { get; set; } = "Light";
 }

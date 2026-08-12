@@ -4,17 +4,29 @@ using System.Text;
 
 namespace OSSStudio.Services;
 
+public sealed record DownloadResult(int FileCount, int RenamedCount);
+
 public sealed class OssObjectService
 {
-    public OssObjectService(int uploadConcurrency = 3, int downloadConcurrency = 3)
+    public OssObjectService(
+        int uploadConcurrency = 3,
+        int downloadConcurrency = 3,
+        int requestTimeoutSeconds = 60,
+        int retryCount = 5)
     {
         UploadConcurrency = Math.Clamp(uploadConcurrency, 1, 8);
         DownloadConcurrency = Math.Clamp(downloadConcurrency, 1, 8);
+        RequestTimeoutSeconds = Math.Clamp(requestTimeoutSeconds, 10, 300);
+        RetryCount = Math.Clamp(retryCount, 0, 5);
     }
 
     public int UploadConcurrency { get; set; }
 
     public int DownloadConcurrency { get; set; }
+
+    public int RequestTimeoutSeconds { get; set; }
+
+    public int RetryCount { get; set; }
 
     public async Task<int> UploadPathsAsync(
         BucketProfile bucket,
@@ -194,21 +206,24 @@ public sealed class OssObjectService
 
     public string GetObjectAddress(
         BucketProfile bucket,
-        BucketCredential credential,
-        string key,
-        DateTime expiresAt)
+        string key)
     {
-        using var client = CreateClient(bucket, credential);
-        var request = new OSS.Models.GetObjectRequest
+        var endpoint = bucket.Endpoint.Trim()
+            .Replace("https://", string.Empty, StringComparison.OrdinalIgnoreCase)
+            .Replace("http://", string.Empty, StringComparison.OrdinalIgnoreCase)
+            .TrimEnd('/');
+        if (string.IsNullOrWhiteSpace(endpoint))
         {
-            Bucket = bucket.Name,
-            Key = key
-        };
-        AddRequesterPaysHeader(request, bucket);
-        var result = client.Presign(request, expiresAt);
-        return string.IsNullOrWhiteSpace(result.Url)
-            ? throw new InvalidOperationException("OSS 未返回对象访问地址")
-            : result.Url;
+            throw new InvalidOperationException("资源桶 Endpoint 不能为空");
+        }
+
+        var host = string.Equals(bucket.EndpointMode, "Cname", StringComparison.OrdinalIgnoreCase)
+            ? endpoint
+            : $"{bucket.Name}.{endpoint}";
+        var encodedKey = string.Join('/', key
+            .Split('/', StringSplitOptions.None)
+            .Select(Uri.EscapeDataString));
+        return $"{(bucket.UseHttps ? "https" : "http")}://{host}/{encodedKey}";
     }
 
     public async Task<string> GetTextObjectAsync(
@@ -265,6 +280,42 @@ public sealed class OssObjectService
         }
     }
 
+    public async Task<byte[]> GetObjectBytesAsync(
+        BucketProfile bucket,
+        BucketCredential credential,
+        string key,
+        int maximumBytes,
+        CancellationToken cancellationToken = default)
+    {
+        using var client = CreateClient(bucket, credential);
+        var request = new OSS.Models.GetObjectRequest { Bucket = bucket.Name, Key = key };
+        AddRequesterPaysHeader(request, bucket);
+        var result = await client.GetObjectAsync(request, cancellationToken: cancellationToken);
+        if (result.ContentLength is > 0 && result.ContentLength > maximumBytes)
+        {
+            result.Body?.Dispose();
+            throw new InvalidOperationException($"预览文件不能超过 {maximumBytes / 1024 / 1024} MB");
+        }
+
+        using var body = result.Body ?? throw new IOException("OSS 未返回文件内容");
+        using var memory = new MemoryStream();
+        var buffer = new byte[32 * 1024];
+        while (true)
+        {
+            var read = await body.ReadAsync(buffer, cancellationToken);
+            if (read == 0)
+            {
+                break;
+            }
+            if (memory.Length + read > maximumBytes)
+            {
+                throw new InvalidOperationException($"预览文件不能超过 {maximumBytes / 1024 / 1024} MB");
+            }
+            await memory.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+        }
+        return memory.ToArray();
+    }
+
     public async Task PutTextObjectAsync(
         BucketProfile bucket,
         BucketCredential credential,
@@ -299,7 +350,7 @@ public sealed class OssObjectService
         await client.GetObjectToFileAsync(request, filePath, cancellationToken: cancellationToken);
     }
 
-    public async Task<int> DownloadFolderAsync(
+    public async Task<DownloadResult> DownloadFolderAsync(
         BucketProfile bucket,
         BucketCredential credential,
         string prefix,
@@ -315,7 +366,7 @@ public sealed class OssObjectService
             progress,
             cancellationToken);
 
-    private async Task<int> DownloadFolderCoreAsync(
+    private async Task<DownloadResult> DownloadFolderCoreAsync(
         BucketProfile bucket,
         BucketCredential credential,
         string prefix,
@@ -331,6 +382,7 @@ public sealed class OssObjectService
         Directory.CreateDirectory(targetRoot);
         var reservedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var downloads = new List<(string Key, string FilePath, string RelativeKey)>();
+        var renamed = 0;
 
         foreach (var item in objects)
         {
@@ -357,7 +409,12 @@ public sealed class OssObjectService
                 throw new IOException($"对象路径超出下载目录：{key}");
             }
 
-            filePath = GetUniqueDownloadPath(filePath, reservedPaths);
+            var requestedPath = filePath;
+            filePath = GetUniqueDownloadPath(requestedPath, reservedPaths);
+            if (!string.Equals(filePath, requestedPath, StringComparison.OrdinalIgnoreCase))
+            {
+                renamed++;
+            }
             downloads.Add((key, filePath, relativeKey));
         }
 
@@ -379,10 +436,10 @@ public sealed class OssObjectService
                 progress?.Report((current, downloads.Count, download.RelativeKey));
             });
 
-        return downloaded;
+        return new DownloadResult(downloaded, renamed);
     }
 
-    public async Task<int> DownloadEntriesAsync(
+    public async Task<DownloadResult> DownloadEntriesAsync(
         BucketProfile bucket,
         BucketCredential credential,
         IReadOnlyList<ObjectEntry> entries,
@@ -391,6 +448,8 @@ public sealed class OssObjectService
         CancellationToken cancellationToken = default)
     {
         var completed = 0;
+        var downloadedFiles = 0;
+        var renamedFiles = 0;
         var reservedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var reservedPathsLock = new object();
         await Parallel.ForEachAsync(
@@ -404,13 +463,15 @@ public sealed class OssObjectService
             {
                 if (entry.IsFolder)
                 {
-                    await DownloadFolderCoreAsync(
+                    var result = await DownloadFolderCoreAsync(
                         bucket,
                         credential,
                         entry.Key,
                         destinationDirectory,
                         1,
                         cancellationToken: token);
+                    Interlocked.Add(ref downloadedFiles, result.FileCount);
+                    Interlocked.Add(ref renamedFiles, result.RenamedCount);
                 }
                 else
                 {
@@ -421,16 +482,21 @@ public sealed class OssObjectService
                     lock (reservedPathsLock)
                     {
                         filePath = GetUniqueDownloadPath(requestedPath, reservedPaths);
+                        if (!string.Equals(filePath, requestedPath, StringComparison.OrdinalIgnoreCase))
+                        {
+                            renamedFiles++;
+                        }
                     }
 
                     await DownloadObjectAsync(bucket, credential, entry.Key, filePath, token);
+                    Interlocked.Increment(ref downloadedFiles);
                 }
 
                 var current = Interlocked.Increment(ref completed);
                 progress?.Report((current, entries.Count, entry.Name));
             });
 
-        return completed;
+        return new DownloadResult(downloadedFiles, renamedFiles);
     }
 
     public async Task<int> DeleteEntriesAsync(
@@ -565,7 +631,7 @@ public sealed class OssObjectService
         }
     }
 
-    private static async Task<IReadOnlyList<string>> ListChildFolderPrefixesCoreAsync(
+    private async Task<IReadOnlyList<string>> ListChildFolderPrefixesCoreAsync(
         BucketProfile bucket,
         BucketCredential credential,
         string endpoint,
@@ -600,7 +666,7 @@ public sealed class OssObjectService
         return folders.OrderBy(prefix => prefix, StringComparer.OrdinalIgnoreCase).ToArray();
     }
 
-    private static async Task<List<ObjectEntry>> ListObjectsCoreAsync(
+    private async Task<List<ObjectEntry>> ListObjectsCoreAsync(
         BucketProfile bucket,
         BucketCredential credential,
         string endpoint,
@@ -688,7 +754,7 @@ public sealed class OssObjectService
         return objects;
     }
 
-    private static OSS.Client CreateClient(
+    private OSS.Client CreateClient(
         BucketProfile bucket,
         BucketCredential credential,
         string? endpoint = null,
@@ -702,6 +768,10 @@ public sealed class OssObjectService
         configuration.Endpoint = endpoint ?? bucket.Endpoint;
         configuration.DisableSsl = !bucket.UseHttps;
         configuration.UseCName = string.Equals(bucket.EndpointMode, "Cname", StringComparison.OrdinalIgnoreCase);
+        var requestTimeout = TimeSpan.FromSeconds(Math.Clamp(RequestTimeoutSeconds, 10, 300));
+        configuration.ConnectTimeout = requestTimeout;
+        configuration.ReadWriteTimeout = requestTimeout;
+        configuration.RetryMaxAttempts = Math.Clamp(RetryCount, 0, 5) + 1;
         return new OSS.Client(configuration);
     }
 

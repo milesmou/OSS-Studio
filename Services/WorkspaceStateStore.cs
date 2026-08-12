@@ -66,6 +66,10 @@ public sealed class WorkspaceStateStore
         state.Bookmarks ??= [];
         state.UploadConcurrency = state.UploadConcurrency is >= 1 and <= 8 ? state.UploadConcurrency : 3;
         state.DownloadConcurrency = state.DownloadConcurrency is >= 1 and <= 8 ? state.DownloadConcurrency : 3;
+        state.RequestTimeoutSeconds = state.RequestTimeoutSeconds is >= 10 and <= 300
+            ? state.RequestTimeoutSeconds
+            : 60;
+        state.RetryCount = state.RetryCount is >= 0 and <= 5 ? state.RetryCount : 5;
         state.ThemeMode = state.ThemeMode is "System" or "Light" or "Dark" ? state.ThemeMode : "Light";
         state.Buckets.RemoveAll(bucket => bucket.Id is
             "bucket-prod-images" or

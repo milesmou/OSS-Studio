@@ -25,7 +25,7 @@ public sealed class OssMainWindow : Window
     private readonly Color Coral;
     private const string AppIconResourceName = "OSSStudio.Assets.OSS-Studio.ico";
     private const string AppLogoResourceName = "OSSStudio.Assets.OSS-Studio.png";
-    private const long ObjectDoubleClickIntervalMilliseconds = 200;
+    private const long ObjectDoubleClickIntervalMilliseconds = 250;
 
     private readonly WorkspaceState _state;
     private readonly WorkspaceStateStore _stateStore;
@@ -66,9 +66,14 @@ public sealed class OssMainWindow : Window
 
     public OssMainWindow(WorkspaceState state, WorkspaceStateStore stateStore)
     {
+        AllowDrop = true;
         _state = state;
         _stateStore = stateStore;
-        _ossObjectService = new OssObjectService(state.UploadConcurrency, state.DownloadConcurrency);
+        _ossObjectService = new OssObjectService(
+            state.UploadConcurrency,
+            state.DownloadConcurrency,
+            state.RequestTimeoutSeconds,
+            state.RetryCount);
         AppThemePalette.Initialize(state.ThemeMode);
         var palette = AppThemePalette.Current;
         Surface = palette.Surface;
@@ -622,7 +627,7 @@ public sealed class OssMainWindow : Window
             .BorderBrush(Color.White.WithAlpha(0))
             .BorderThickness(2)
             .Child(new Grid().Children(objectView, headerSelector));
-        ConfigureDropUpload(dropSurface, bucket);
+        ConfigureDropUpload(dropSurface, bucket, objectView, headerSelector);
 
         var bookmarkButton = BrowserToolbarButton(
             "☆ 未收藏",
@@ -1336,15 +1341,15 @@ public sealed class OssMainWindow : Window
                     SetStatus(bucketId, $"正在下载 {value.Current}/{value.Total}：{value.Name}");
                     UpdateTransferTask(transferTask, value.Current, value.Total, value.Name);
                 });
-                var count = await _ossObjectService.DownloadFolderAsync(
+                var result = await _ossObjectService.DownloadFolderAsync(
                     bucket,
                     credential,
                     entry.Key,
                     destination,
                     progress,
                     cancellation.Token);
-                var message = $"文件夹下载完成，共 {count} 个文件";
-                FinishTransferTask(transferTask, "已完成", message, count, count);
+                var message = BuildDownloadCompletionMessage("文件夹下载完成", result);
+                FinishTransferTask(transferTask, "已完成", message, result.FileCount, result.FileCount);
                 SetStatus(bucketId, message);
                 this.ShowToast(message);
             }
@@ -1540,10 +1545,10 @@ public sealed class OssMainWindow : Window
                 SetStatus(bucketId, $"正在下载 {value.Current}/{value.Total}：{value.Name}");
                 UpdateTransferTask(transferTask, value.Current, value.Total, value.Name);
             });
-            var count = await _ossObjectService.DownloadEntriesAsync(
+            var result = await _ossObjectService.DownloadEntriesAsync(
                 bucket, credential, entries, destination, progress, cancellation.Token);
-            var message = $"批量下载完成，共处理 {count} 个对象";
-            FinishTransferTask(transferTask, "已完成", message, count, count);
+            var message = BuildDownloadCompletionMessage("批量下载完成", result);
+            FinishTransferTask(transferTask, "已完成", message, result.FileCount, result.FileCount);
             SetStatus(bucketId, message);
             this.ShowToast(message);
         }
@@ -1562,6 +1567,11 @@ public sealed class OssMainWindow : Window
             EndTransfer(bucketId, cancellation);
         }
     }
+
+    private static string BuildDownloadCompletionMessage(string title, DownloadResult result)
+        => result.RenamedCount > 0
+            ? $"{title}，共 {result.FileCount} 个文件，其中 {result.RenamedCount} 个重名文件已自动重命名"
+            : $"{title}，共 {result.FileCount} 个文件";
 
     private async Task DeleteEntriesAsync(string bucketId, IReadOnlyList<ObjectEntry> entries)
     {
@@ -1721,7 +1731,7 @@ public sealed class OssMainWindow : Window
         try
         {
             SetStatus(bucketId, "正在加载 OSS 目录树…");
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(_state.RequestTimeoutSeconds));
             folderPrefixes = await _ossObjectService.ListChildFolderPrefixesAsync(
                 bucket, credential, bucket.Prefix, timeout.Token);
         }
@@ -1745,8 +1755,15 @@ public sealed class OssMainWindow : Window
             singleEntry?.Name.TrimEnd('/') ?? $"已选择 {entries.Count} 个对象（保留原名称）",
             allowRename: singleEntry is not null,
             confirmText: "复制到此处",
+            requestTimeoutSeconds: _state.RequestTimeoutSeconds,
             loadChildren: (prefix, token) => _ossObjectService.ListChildFolderPrefixesAsync(
                 bucket, credential, prefix, token),
+            createDirectory: (prefix, name, token) => CreatePickerDirectoryAsync(
+                bucket, credential, prefix, name, token),
+            deleteDirectory: (prefix, token) => DeletePickerDirectoryAsync(
+                bucket, credential, prefix, token),
+            renameDirectory: (source, target, token) => RenamePickerDirectoryAsync(
+                bucket, credential, source, target, token),
             validate: (prefix, name) =>
             {
                 if (singleEntry is null)
@@ -1835,7 +1852,7 @@ public sealed class OssMainWindow : Window
         try
         {
             SetStatus(bucketId, "正在加载 OSS 目录树…");
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(_state.RequestTimeoutSeconds));
             folderPrefixes = await _ossObjectService.ListChildFolderPrefixesAsync(
                 bucket, credential, bucket.Prefix, timeout.Token);
         }
@@ -1850,20 +1867,24 @@ public sealed class OssMainWindow : Window
             ShowOperationError(bucketId, "加载目录树失败", exception);
             return;
         }
-        var sourceKey = entry.Key.TrimEnd('/');
-        var separator = sourceKey.LastIndexOf('/');
-        var parentPrefix = separator >= 0 ? sourceKey[..(separator + 1)] : string.Empty;
         var overlay = new ObjectDestinationOverlay(
             "移动并可重命名 OSS 对象",
             bucket.Name,
             bucket.Prefix,
             folderPrefixes,
-            parentPrefix,
+            GetTabState(bucket).CurrentPrefix,
             entry.Name.TrimEnd('/'),
             allowRename: true,
             confirmText: "移动到此处",
+            requestTimeoutSeconds: _state.RequestTimeoutSeconds,
             loadChildren: (prefix, token) => _ossObjectService.ListChildFolderPrefixesAsync(
                 bucket, credential, prefix, token),
+            createDirectory: (prefix, name, token) => CreatePickerDirectoryAsync(
+                bucket, credential, prefix, name, token),
+            deleteDirectory: (prefix, token) => DeletePickerDirectoryAsync(
+                bucket, credential, prefix, token),
+            renameDirectory: (source, target, token) => RenamePickerDirectoryAsync(
+                bucket, credential, source, target, token),
             validate: (prefix, name) =>
             {
                 var nameError = ValidateObjectName(name);
@@ -1885,6 +1906,55 @@ public sealed class OssMainWindow : Window
             return;
         }
         await MoveEntryToAsync(bucket, entry, targetKey, "移动");
+    }
+
+    private async Task CreatePickerDirectoryAsync(
+        BucketProfile bucket,
+        BucketCredential credential,
+        string parentPrefix,
+        string name,
+        CancellationToken cancellationToken)
+    {
+        var key = parentPrefix + name + "/";
+        await _ossObjectService.CreateFolderAsync(bucket, credential, key, cancellationToken);
+        SetStatus(bucket.Id, $"已创建目录：{key}");
+        await RefreshBucketAsync(bucket);
+    }
+
+    private async Task DeletePickerDirectoryAsync(
+        BucketProfile bucket,
+        BucketCredential credential,
+        string prefix,
+        CancellationToken cancellationToken)
+    {
+        var deleted = await _ossObjectService.DeleteFolderAsync(bucket, credential, prefix, cancellationToken);
+        RemoveBookmarksUnderPrefix(bucket.Id, prefix);
+        SetStatus(bucket.Id, $"已删除目录：{prefix}（{deleted} 个对象）");
+        await RefreshBucketAsync(bucket);
+    }
+
+    private async Task RenamePickerDirectoryAsync(
+        BucketProfile bucket,
+        BucketCredential credential,
+        string sourcePrefix,
+        string targetPrefix,
+        CancellationToken cancellationToken)
+    {
+        var sourceName = sourcePrefix.TrimEnd('/').Split('/').Last() + "/";
+        var entry = new ObjectEntry(
+            sourceName,
+            IsFolder: true,
+            Size: "—",
+            StorageClass: string.Empty,
+            LastModified: DateTime.MinValue,
+            Key: sourcePrefix);
+        await _ossObjectService.CopyEntryAsync(
+            bucket, credential, entry, targetPrefix, cancellationToken: cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        await _ossObjectService.DeleteFolderAsync(bucket, credential, sourcePrefix, cancellationToken);
+        RemapBookmarks(bucket.Id, sourcePrefix, targetPrefix);
+        SetStatus(bucket.Id, $"目录重命名完成：{targetPrefix}");
+        await RefreshBucketAsync(bucket);
     }
 
     private async Task RenameEntryAsync(string bucketId, ObjectEntry entry)
@@ -1999,10 +2069,9 @@ public sealed class OssMainWindow : Window
     private void CopyObjectAddress(string bucketId, ObjectEntry entry)
     {
         var bucket = FindBucket(bucketId);
-        var credential = bucket is null ? null : LoadCredential(bucket.Id);
-        if (bucket is null || credential is null || entry.IsFolder)
+        if (bucket is null || entry.IsFolder)
         {
-            SetStatus(bucketId, "未找到资源桶、文件或 AccessKey 配置");
+            SetStatus(bucketId, "未找到资源桶或文件");
             return;
         }
 
@@ -2010,15 +2079,13 @@ public sealed class OssMainWindow : Window
         {
             var address = _ossObjectService.GetObjectAddress(
                 bucket,
-                credential,
-                entry.Key,
-                DateTime.UtcNow.AddHours(1));
+                entry.Key);
             if (!WindowsClipboard.TrySetText(address))
             {
                 throw new InvalidOperationException("无法写入 Windows 剪贴板，请稍后重试");
             }
 
-            var message = "已复制对象地址，链接有效期为 1 小时";
+            var message = "已复制无参数对象地址；私有文件访问时仍需权限";
             SetStatus(bucketId, message);
             this.ShowToast(message);
         }
@@ -2230,7 +2297,8 @@ public sealed class OssMainWindow : Window
     {
         var overlay = new SettingsOverlay(
             _state.UploadConcurrency,
-            _state.DownloadConcurrency,
+            _state.RequestTimeoutSeconds,
+            _state.RetryCount,
             _state.ThemeMode);
         var result = await overlay.ShowAsync(this);
         if (result is null)
@@ -2239,14 +2307,18 @@ public sealed class OssMainWindow : Window
         }
 
         var themeChanged = !string.Equals(_state.ThemeMode, result.ThemeMode, StringComparison.Ordinal);
-        _state.UploadConcurrency = Math.Clamp(result.UploadConcurrency, 1, 8);
-        _state.DownloadConcurrency = Math.Clamp(result.DownloadConcurrency, 1, 8);
+        _state.UploadConcurrency = Math.Clamp(result.TransferConcurrency, 1, 8);
+        _state.DownloadConcurrency = _state.UploadConcurrency;
+        _state.RequestTimeoutSeconds = Math.Clamp(result.RequestTimeoutSeconds, 10, 300);
+        _state.RetryCount = Math.Clamp(result.RetryCount, 0, 5);
         _state.ThemeMode = result.ThemeMode;
         _ossObjectService.UploadConcurrency = _state.UploadConcurrency;
         _ossObjectService.DownloadConcurrency = _state.DownloadConcurrency;
+        _ossObjectService.RequestTimeoutSeconds = _state.RequestTimeoutSeconds;
+        _ossObjectService.RetryCount = _state.RetryCount;
         SaveWorkspace();
 
-        var message = $"设置已保存：上传并发 {_state.UploadConcurrency}，下载并发 {_state.DownloadConcurrency}";
+        var message = $"设置已保存：上传下载并发 {_state.UploadConcurrency}，超时 {_state.RequestTimeoutSeconds} 秒，重试 {_state.RetryCount} 次";
         if (themeChanged)
         {
             var runningTransferDetail = _transferTasks.Any(task => task.IsRunning)
@@ -2415,22 +2487,9 @@ public sealed class OssMainWindow : Window
         this.ShowToast(message);
     }
 
-    private async Task OpenTextEditorAsync(BucketProfile bucket, ObjectEntry entry)
+    private async Task OpenFilePreviewAsync(BucketProfile bucket, ObjectEntry entry)
     {
         bucket = FindBucket(bucket.Id) ?? bucket;
-        if (!IsTextFile(entry.Name))
-        {
-            SetStatus(bucket.Id, "该文件类型不支持文本预览");
-            return;
-        }
-
-        const int maximumBytes = 2 * 1024 * 1024;
-        if (entry.SizeBytes > maximumBytes)
-        {
-            SetStatus(bucket.Id, "文本文件超过 2 MB，无法在线编辑");
-            return;
-        }
-
         var credential = LoadCredential(bucket.Id);
         if (credential is null)
         {
@@ -2438,41 +2497,46 @@ public sealed class OssMainWindow : Window
             return;
         }
 
-        try
-        {
-            SetStatus(bucket.Id, $"正在加载：{entry.Name}");
-            var original = await _ossObjectService.GetTextObjectAsync(
-                bucket,
-                credential,
-                entry.Key,
-                maximumBytes);
-            var editor = new TextEditorOverlay(bucket.Name, entry.Name, entry.Key, original);
-            var edited = await editor.ShowAsync(this);
-            if (edited is null || string.Equals(edited, original, StringComparison.Ordinal))
+        const int maximumTextBytes = 2 * 1024 * 1024;
+        const int maximumImageBytes = 20 * 1024 * 1024;
+        var kind = IsTextFile(entry.Name)
+            ? FilePreviewKind.Text
+            : IsImageFile(entry.Name)
+                ? FilePreviewKind.Image
+                : FilePreviewKind.Unsupported;
+        var preview = new FilePreviewOverlay(
+            bucket.Name,
+            entry.Name,
+            entry.Key,
+            kind,
+            loadText: token => _ossObjectService.GetTextObjectAsync(
+                bucket, credential, entry.Key, maximumTextBytes, token),
+            loadImage: token => _ossObjectService.GetObjectBytesAsync(
+                bucket, credential, entry.Key, maximumImageBytes, token),
+            saveText: async (content, token) =>
             {
-                SetStatus(bucket.Id, edited is null ? "已取消编辑" : "文件内容未修改");
-                return;
-            }
-
-            SetStatus(bucket.Id, $"正在保存：{entry.Name}");
-            await _ossObjectService.PutTextObjectAsync(bucket, credential, entry.Key, edited);
-            SetStatus(bucket.Id, $"已保存：{entry.Name}");
-            this.ShowToast($"已保存到 OSS：{entry.Name}");
-            await RefreshBucketAsync(bucket);
-        }
-        catch (Exception exception)
-        {
-            ShowOperationError(bucket.Id, "打开文本文件失败", exception);
-        }
+                await _ossObjectService.PutTextObjectAsync(bucket, credential, entry.Key, content, token);
+                SetStatus(bucket.Id, $"已保存：{entry.Name}");
+                this.ShowToast($"已保存到 OSS：{entry.Name}");
+                await RefreshBucketAsync(bucket);
+            },
+            download: () => _ = DownloadEntryAsync(bucket.Id, entry),
+            getAddress: () => CopyObjectAddress(bucket.Id, entry));
+        SetStatus(bucket.Id, $"正在预览：{entry.Name}");
+        await preview.ShowAsync(this);
+        SetStatus(bucket.Id, $"已关闭预览：{entry.Name}");
     }
 
-    private void ConfigureDropUpload(Border dropSurface, BucketProfile bucket)
+    private void ConfigureDropUpload(
+        Border dropSurface,
+        BucketProfile bucket,
+        params UIElement[] dropTargets)
     {
         var normalBorder = Color.White.WithAlpha(0);
         var normalBackground = ObjectListSurface;
         var activeBorder = Teal.WithAlpha(165);
-        dropSurface.AllowDrop = true;
-        dropSurface.DragEnter += args =>
+
+        void OnDragEnter(DragEventArgs args)
         {
             if (!TryGetDroppedPaths(args, out _))
             {
@@ -2485,8 +2549,9 @@ public sealed class OssMainWindow : Window
             dropSurface.BorderBrush = activeBorder;
             dropSurface.Background = Teal.WithAlpha(12);
             SetStatus(bucket.Id, "释放鼠标以上传文件或文件夹到当前目录");
-        };
-        dropSurface.DragOver += args =>
+        }
+
+        void OnDragOver(DragEventArgs args)
         {
             if (TryGetDroppedPaths(args, out _))
             {
@@ -2494,13 +2559,15 @@ public sealed class OssMainWindow : Window
                 args.Effect = DragDropEffects.Copy;
                 args.Handled = true;
             }
-        };
-        dropSurface.DragLeave += _ =>
+        }
+
+        void OnDragLeave(DragEventArgs _)
         {
             dropSurface.BorderBrush = normalBorder;
             dropSurface.Background = normalBackground;
-        };
-        dropSurface.Drop += args =>
+        }
+
+        void OnDrop(DragEventArgs args)
         {
             dropSurface.BorderBrush = normalBorder;
             dropSurface.Background = normalBackground;
@@ -2513,7 +2580,16 @@ public sealed class OssMainWindow : Window
             args.Effect = DragDropEffects.Copy;
             args.Handled = true;
             _ = UploadDroppedPathsAsync(bucket, paths);
-        };
+        }
+
+        foreach (var target in dropTargets.Prepend(dropSurface))
+        {
+            target.AllowDrop = true;
+            target.DragEnter += OnDragEnter;
+            target.DragOver += OnDragOver;
+            target.DragLeave += OnDragLeave;
+            target.Drop += OnDrop;
+        }
     }
 
     private static bool TryGetDroppedPaths(DragEventArgs args, out IReadOnlyList<string> paths)
@@ -2615,6 +2691,9 @@ public sealed class OssMainWindow : Window
             ".sh" or ".ps1" or ".bat" or ".cmd" or ".ini" or ".conf" or ".config" or
             ".properties" or ".log" or ".graphql" or ".gql" or ".toml" or ".svg";
     }
+
+    private static bool IsImageFile(string name)
+        => Path.GetExtension(name).ToLowerInvariant() is ".png" or ".jpg" or ".jpeg" or ".bmp" or ".ico";
 
     private GridViewColumn<ObjectEntry>[] CreateObjectColumns(string bucketId, double nameWidth)
     {
@@ -2874,7 +2953,7 @@ public sealed class OssMainWindow : Window
             }
             else
             {
-                _ = OpenTextEditorAsync(bucket, entry);
+                _ = OpenFilePreviewAsync(bucket, entry);
             }
 
             return;
@@ -2898,6 +2977,10 @@ public sealed class OssMainWindow : Window
             var tabState = GetTabState(bucket);
             tabState.SelectedEntry = entry;
             tabState.LastObjectClick = null;
+            if (!tabState.CheckedObjectKeys.Contains(entry.Key))
+            {
+                SetObjectChecked(bucket.Id, entry, true);
+            }
             ShowObjectContextMenu(objectView, bucket, entry, args);
             args.Handled = true;
             return;

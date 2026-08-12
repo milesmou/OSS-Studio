@@ -10,10 +10,15 @@ internal sealed class ObjectDestinationOverlay : ContentControl
     private readonly TreeView _directoryTree = new();
     private readonly TextBox _nameBox = new();
     private readonly TextBlock _selectedDirectoryText = new();
+    private readonly Border _selectedDirectoryBorder = new();
     private readonly TextBlock _treeStatusText = new();
     private readonly TextBlock _errorText = new();
     private readonly Func<string, string, string?> _validate;
     private readonly Func<string, CancellationToken, Task<IReadOnlyList<string>>> _loadChildren;
+    private readonly Func<string, string, CancellationToken, Task> _createDirectory;
+    private readonly Func<string, CancellationToken, Task> _deleteDirectory;
+    private readonly Func<string, string, CancellationToken, Task> _renameDirectory;
+    private readonly int _requestTimeoutSeconds;
     private readonly TaskCompletionSource<ObjectDestinationResult?> _completion = new();
     private readonly CancellationTokenSource _lifetimeCancellation = new();
     private readonly HashSet<string> _knownPrefixes = new(StringComparer.Ordinal);
@@ -28,6 +33,9 @@ internal sealed class ObjectDestinationOverlay : ContentControl
     private OssMainWindow? _owner;
     private readonly string _bucketName;
     private readonly string _rootPrefix;
+    private readonly string _initialPrefix;
+    private IReadOnlyList<TreeViewNode> _treeNodes = [];
+    private bool _locatingInitialDirectory;
     private string _selectedPrefix;
 
     public ObjectDestinationOverlay(
@@ -39,7 +47,11 @@ internal sealed class ObjectDestinationOverlay : ContentControl
         string initialName,
         bool allowRename,
         string confirmText,
+        int requestTimeoutSeconds,
         Func<string, CancellationToken, Task<IReadOnlyList<string>>> loadChildren,
+        Func<string, string, CancellationToken, Task> createDirectory,
+        Func<string, CancellationToken, Task> deleteDirectory,
+        Func<string, string, CancellationToken, Task> renameDirectory,
         Func<string, string, string?> validate)
     {
         var palette = AppThemePalette.Current;
@@ -51,8 +63,13 @@ internal sealed class ObjectDestinationOverlay : ContentControl
         _coral = palette.Coral;
         _validate = validate;
         _loadChildren = loadChildren;
+        _createDirectory = createDirectory;
+        _deleteDirectory = deleteDirectory;
+        _renameDirectory = renameDirectory;
+        _requestTimeoutSeconds = Math.Clamp(requestTimeoutSeconds, 10, 300);
         _bucketName = bucketName;
         _rootPrefix = rootPrefix;
+        _initialPrefix = initialPrefix;
 
         _knownPrefixes.Add(rootPrefix);
         _loadedPrefixes.Add(rootPrefix);
@@ -62,6 +79,7 @@ internal sealed class ObjectDestinationOverlay : ContentControl
         }
         AddPrefixAncestors(initialPrefix);
         var nodes = BuildDirectoryNodes();
+        _treeNodes = nodes;
         _selectedPrefix = _knownPrefixes.Contains(initialPrefix)
             ? initialPrefix
             : rootPrefix;
@@ -69,7 +87,7 @@ internal sealed class ObjectDestinationOverlay : ContentControl
             .ItemsSource(nodes)
             .OnExpanding(args =>
             {
-                if (args.Item is TreeViewNode node)
+                if (!_locatingInitialDirectory && args.Item is TreeViewNode node)
                 {
                     _ = LoadChildrenAsync(node);
                 }
@@ -82,22 +100,24 @@ internal sealed class ObjectDestinationOverlay : ContentControl
                     UpdateSelectedDirectory(bucketName);
                     _errorText.Text = string.Empty;
                 }
-            });
-        if (FindNode(nodes, _selectedPrefix) is { } selectedNode)
-        {
-            _directoryTree.SelectedNode = selectedNode;
-            ExpandToPrefix(nodes[0], _selectedPrefix);
-        }
+            })
+            .OnMouseDown(HandleDirectoryTreeMouseDown);
         if (nodes.Count > 0)
         {
             _directoryTree.Expand(nodes[0]);
-            ExpandToPrefix(nodes[0], _selectedPrefix);
         }
 
         _nameBox.Text = initialName;
         _nameBox.IsEnabled = allowRename;
         _nameBox.Placeholder("对象名称").Height(36);
         _selectedDirectoryText.Foreground = _mutedText;
+        _selectedDirectoryBorder
+            .Padding(10, 9)
+            .Background(_panelSurface)
+            .BorderBrush(_borderColor)
+            .BorderThickness(1)
+            .CornerRadius(5)
+            .Child(_selectedDirectoryText);
         _treeStatusText.Foreground = _mutedText;
         _treeStatusText.FontSize = 11;
         _treeStatusText.Text = "展开目录时按需加载下一层";
@@ -129,7 +149,68 @@ internal sealed class ObjectDestinationOverlay : ContentControl
     {
         _owner = owner;
         owner.ShowModal(this);
+        _ = LocateInitialDirectoryAsync();
         return _completion.Task;
+    }
+
+    private async Task LocateInitialDirectoryAsync()
+    {
+        _locatingInitialDirectory = true;
+        _directoryTree.IsEnabled = false;
+        _treeStatusText.Text = "正在定位当前目录…";
+        try
+        {
+            foreach (var prefix in GetPrefixesToLoad(_initialPrefix))
+            {
+                if (_loadedPrefixes.Contains(prefix))
+                {
+                    continue;
+                }
+
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(_lifetimeCancellation.Token);
+                timeout.CancelAfter(TimeSpan.FromSeconds(_requestTimeoutSeconds));
+                var children = await _loadChildren(prefix, timeout.Token);
+                foreach (var child in children)
+                {
+                    _knownPrefixes.Add(child);
+                }
+                _loadedPrefixes.Add(prefix);
+            }
+
+            _treeStatusText.Text = "已定位当前目录";
+        }
+        catch (OperationCanceledException) when (!_lifetimeCancellation.IsCancellationRequested)
+        {
+            _treeStatusText.Text = "定位当前目录超时，可手动展开目录重试";
+        }
+        catch (Exception exception)
+        {
+            _treeStatusText.Text = $"定位当前目录失败：{exception.Message}";
+        }
+        finally
+        {
+            RebuildTree();
+            _locatingInitialDirectory = false;
+            _directoryTree.IsEnabled = true;
+        }
+    }
+
+    private IEnumerable<string> GetPrefixesToLoad(string targetPrefix)
+    {
+        if (!targetPrefix.StartsWith(_rootPrefix, StringComparison.Ordinal) ||
+            string.Equals(targetPrefix, _rootPrefix, StringComparison.Ordinal))
+        {
+            yield break;
+        }
+
+        var current = _rootPrefix;
+        var segments = targetPrefix[_rootPrefix.Length..]
+            .Split('/', StringSplitOptions.RemoveEmptyEntries);
+        for (var index = 0; index < segments.Length - 1; index++)
+        {
+            current += segments[index] + "/";
+            yield return current;
+        }
     }
 
     private FrameworkElement BuildHeader(string title)
@@ -175,13 +256,7 @@ internal sealed class ObjectDestinationOverlay : ContentControl
                     .Spacing(10)
                     .Children(
                         new TextBlock().Text("目标目录").Bold(),
-                        new Border()
-                            .Padding(10, 9)
-                            .Background(_panelSurface)
-                            .BorderBrush(_borderColor)
-                            .BorderThickness(1)
-                            .CornerRadius(5)
-                            .Child(_selectedDirectoryText),
+                        _selectedDirectoryBorder,
                         new TextBlock().Text(allowRename ? "对象名称（修改即重命名）" : "对象名称").Bold(),
                         _nameBox.StretchHorizontal(),
                         new TextBlock()
@@ -232,7 +307,224 @@ internal sealed class ObjectDestinationOverlay : ContentControl
     }
 
     private void UpdateSelectedDirectory(string bucketName)
-        => _selectedDirectoryText.Text = $"oss://{bucketName}/{_selectedPrefix}";
+    {
+        var path = $"oss://{bucketName}/{_selectedPrefix}";
+        _selectedDirectoryText.Text = path;
+        _selectedDirectoryBorder.ToolTip(path);
+    }
+
+    private void HandleDirectoryTreeMouseDown(MouseEventArgs args)
+    {
+        if (args.Button != MouseButton.Right ||
+            _owner is null ||
+            !_directoryTree.TryGetItemIndexAt(args, out var index))
+        {
+            return;
+        }
+
+        var visibleNodes = GetVisibleNodes().ToArray();
+        if (index < 0 || index >= visibleNodes.Length || visibleNodes[index].Tag is not string prefix)
+        {
+            return;
+        }
+
+        _selectedPrefix = prefix;
+        _directoryTree.SelectedNode = visibleNodes[index];
+        UpdateSelectedDirectory(_bucketName);
+        var menu = new ContextMenu()
+            .Item("新建目录", () => _ = CreateDirectoryAsync(prefix));
+        if (!string.Equals(prefix, _rootPrefix, StringComparison.Ordinal))
+        {
+            menu.Item("重命名目录", () => _ = RenameDirectoryAsync(prefix))
+                .Item("删除目录", () => _ = DeleteDirectoryAsync(prefix));
+        }
+        menu.ShowAt(_directoryTree, _owner.ScreenToClient(args.ScreenPosition));
+        args.Handled = true;
+    }
+
+    private IEnumerable<TreeViewNode> GetVisibleNodes()
+    {
+        foreach (var node in _treeNodes)
+        {
+            foreach (var visibleNode in GetVisibleNodes(node))
+            {
+                yield return visibleNode;
+            }
+        }
+    }
+
+    private IEnumerable<TreeViewNode> GetVisibleNodes(TreeViewNode node)
+    {
+        yield return node;
+        if (!_directoryTree.IsExpanded(node))
+        {
+            yield break;
+        }
+        foreach (var child in node.Children)
+        {
+            foreach (var visibleNode in GetVisibleNodes(child))
+            {
+                yield return visibleNode;
+            }
+        }
+    }
+
+    private async Task CreateDirectoryAsync(string parentPrefix)
+    {
+        if (_owner is null)
+        {
+            return;
+        }
+        var prompt = new TextPromptOverlay(
+            "新建 OSS 目录",
+            $"在 oss://{_bucketName}/{parentPrefix} 下创建目录。",
+            "目录名称",
+            validate: ValidateDirectoryName);
+        var name = await prompt.ShowAsync(_owner);
+        if (name is null)
+        {
+            return;
+        }
+
+        var childPrefix = parentPrefix + name.Trim() + "/";
+        await RunDirectoryOperationAsync("正在创建目录…", async token =>
+        {
+            await _createDirectory(parentPrefix, name.Trim(), token);
+            _knownPrefixes.Add(childPrefix);
+            _loadedPrefixes.Add(parentPrefix);
+            _selectedPrefix = childPrefix;
+            RebuildTree();
+            _treeStatusText.Text = "目录创建完成";
+        });
+    }
+
+    private async Task RenameDirectoryAsync(string sourcePrefix)
+    {
+        if (_owner is null)
+        {
+            return;
+        }
+        var sourceName = sourcePrefix.TrimEnd('/').Split('/').Last();
+        var prompt = new TextPromptOverlay(
+            "重命名 OSS 目录",
+            $"输入“{sourceName}”的新名称。",
+            "新目录名称",
+            sourceName,
+            ValidateDirectoryName);
+        var name = await prompt.ShowAsync(_owner);
+        if (name is null || string.Equals(name.Trim(), sourceName, StringComparison.Ordinal))
+        {
+            return;
+        }
+        var parentPrefix = GetParentPrefix(sourcePrefix);
+        var targetPrefix = parentPrefix + name.Trim() + "/";
+        var confirmation = new ConfirmOverlay(
+            "确认重命名目录",
+            $"确定将“{sourcePrefix}”重命名为“{targetPrefix}”吗？",
+            "OSS 没有原生重命名操作；应用会先复制目录内容，成功后再删除原目录。",
+            "重命名");
+        if (!await confirmation.ShowAsync(_owner))
+        {
+            return;
+        }
+
+        await RunDirectoryOperationAsync("正在重命名目录…", async token =>
+        {
+            await _renameDirectory(sourcePrefix, targetPrefix, token);
+            RemapPrefixSet(_knownPrefixes, sourcePrefix, targetPrefix);
+            RemapPrefixSet(_loadedPrefixes, sourcePrefix, targetPrefix);
+            if (_selectedPrefix.StartsWith(sourcePrefix, StringComparison.Ordinal))
+            {
+                _selectedPrefix = targetPrefix + _selectedPrefix[sourcePrefix.Length..];
+            }
+            RebuildTree();
+            _treeStatusText.Text = "目录重命名完成";
+        });
+    }
+
+    private async Task DeleteDirectoryAsync(string prefix)
+    {
+        if (_owner is null)
+        {
+            return;
+        }
+        var confirmation = new ConfirmOverlay(
+            "确认删除目录",
+            $"确定删除目录“{prefix}”吗？",
+            "该目录前缀下的所有 OSS 对象都会被递归删除，此操作不可撤销。",
+            "删除");
+        if (!await confirmation.ShowAsync(_owner))
+        {
+            return;
+        }
+
+        var parentPrefix = GetParentPrefix(prefix);
+        await RunDirectoryOperationAsync("正在删除目录…", async token =>
+        {
+            await _deleteDirectory(prefix, token);
+            _knownPrefixes.RemoveWhere(item => item.StartsWith(prefix, StringComparison.Ordinal));
+            _loadedPrefixes.RemoveWhere(item => item.StartsWith(prefix, StringComparison.Ordinal));
+            _selectedPrefix = parentPrefix;
+            RebuildTree();
+            _treeStatusText.Text = "目录删除完成";
+        });
+    }
+
+    private async Task RunDirectoryOperationAsync(
+        string status,
+        Func<CancellationToken, Task> operation)
+    {
+        _directoryTree.IsEnabled = false;
+        _treeStatusText.Text = status;
+        try
+        {
+            await operation(_lifetimeCancellation.Token);
+        }
+        catch (OperationCanceledException) when (!_lifetimeCancellation.IsCancellationRequested)
+        {
+            _treeStatusText.Text = "操作已取消";
+        }
+        catch (Exception exception)
+        {
+            _treeStatusText.Text = $"操作失败：{exception.Message}";
+        }
+        finally
+        {
+            _directoryTree.IsEnabled = true;
+        }
+    }
+
+    private static string? ValidateDirectoryName(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return "目录名称不能为空";
+        }
+        if (value.IndexOfAny(['/', '\\']) >= 0)
+        {
+            return "目录名称不能包含斜杠";
+        }
+        return value.Trim() is "." or ".." ? "目录名称不能是 . 或 .." : null;
+    }
+
+    private static string GetParentPrefix(string prefix)
+    {
+        var value = prefix.TrimEnd('/');
+        var separator = value.LastIndexOf('/');
+        return separator >= 0 ? value[..(separator + 1)] : string.Empty;
+    }
+
+    private static void RemapPrefixSet(HashSet<string> prefixes, string source, string target)
+    {
+        var affected = prefixes
+            .Where(prefix => prefix.StartsWith(source, StringComparison.Ordinal))
+            .ToArray();
+        prefixes.ExceptWith(affected);
+        foreach (var prefix in affected)
+        {
+            prefixes.Add(target + prefix[source.Length..]);
+        }
+    }
 
     private void Complete(ObjectDestinationResult? result)
     {
@@ -290,14 +582,14 @@ internal sealed class ObjectDestinationOverlay : ContentControl
         try
         {
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(_lifetimeCancellation.Token);
-            timeout.CancelAfter(TimeSpan.FromSeconds(20));
+            timeout.CancelAfter(TimeSpan.FromSeconds(_requestTimeoutSeconds));
             var children = await _loadChildren(prefix, timeout.Token);
             foreach (var child in children)
             {
                 _knownPrefixes.Add(child);
             }
             _loadedPrefixes.Add(prefix);
-            RebuildTree(prefix);
+            RebuildTree();
             _treeStatusText.Text = children.Count == 0 ? "该目录没有子目录" : $"已加载 {children.Count} 个子目录";
         }
         catch (OperationCanceledException) when (!_lifetimeCancellation.IsCancellationRequested)
@@ -315,22 +607,34 @@ internal sealed class ObjectDestinationOverlay : ContentControl
         }
     }
 
-    private void RebuildTree(string expandPrefix)
+    private void RebuildTree()
     {
         var nodes = BuildDirectoryNodes();
+        _treeNodes = nodes;
         _directoryTree.ItemsSource(nodes);
-        if (FindNode(nodes, _selectedPrefix) is { } selectedNode)
+        if (nodes.Count > 0)
         {
-            _directoryTree.SelectedNode = selectedNode;
+            _directoryTree.Expand(nodes[0]);
             ExpandToPrefix(nodes[0], _selectedPrefix);
         }
-        foreach (var prefix in _loadedPrefixes.Append(expandPrefix))
+        foreach (var prefix in _loadedPrefixes)
         {
             if (FindNode(nodes, prefix) is { } node)
             {
                 ExpandToPrefix(nodes[0], prefix);
                 _directoryTree.Expand(node);
             }
+        }
+        SelectCurrentDirectory(nodes);
+    }
+
+    private void SelectCurrentDirectory(IReadOnlyList<TreeViewNode> nodes)
+    {
+        if (FindNode(nodes, _selectedPrefix) is { } selectedNode)
+        {
+            _directoryTree.SelectedNode = selectedNode;
+            _directoryTree.ScrollIntoViewSelected();
+            Application.Current?.Dispatcher?.BeginInvoke(_directoryTree.ScrollIntoViewSelected);
         }
     }
 
