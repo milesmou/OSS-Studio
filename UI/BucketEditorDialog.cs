@@ -31,6 +31,7 @@ public sealed class BucketEditorDialog : ContentControl
     private readonly string _submitText;
     private readonly string _dialogTitle;
     private readonly TaskCompletionSource<bool> _completion = new();
+    private bool _regionDropDownPrimed;
     private Window? _owner;
     private OssMainWindow? _modalOwner;
 
@@ -73,7 +74,8 @@ public sealed class BucketEditorDialog : ContentControl
         _regionBox
             .Items(_regionOptions, item => item.DisplayName, item => item.Code)
             .MaxDropDownHeight(360)
-            .SelectedIndex(regionIndex);
+            .SelectedIndex(regionIndex)
+            .OnMouseDown(_ => PrimeRegionDropDownOnFirstOpen());
 
         _accessKeyIdBox.Text = credential?.AccessKeyId ?? string.Empty;
         _accessKeySecretBox.Password = credential?.AccessKeySecret ?? string.Empty;
@@ -217,6 +219,37 @@ public sealed class BucketEditorDialog : ContentControl
                                 Teal.WithAlpha(38),
                                 Teal.WithAlpha(58),
                                 Teal.WithAlpha(88))));
+    }
+
+    private void PrimeRegionDropDownOnFirstOpen()
+    {
+        if (_regionDropDownPrimed || _regionBox.IsDropDownOpen || _regionOptions.Count < 2 ||
+            Application.Current?.Dispatcher is not { } dispatcher)
+        {
+            return;
+        }
+
+        _regionDropDownPrimed = true;
+        dispatcher.BeginInvoke(DispatcherPriority.Render, () =>
+        {
+            if (!_regionBox.IsDropDownOpen)
+            {
+                _regionDropDownPrimed = false;
+                return;
+            }
+
+            var originalIndex = _regionBox.SelectedIndex;
+            var probeIndex = originalIndex == 0 ? 1 : 0;
+            _regionBox.SelectedIndex = probeIndex;
+
+            dispatcher.BeginInvoke(DispatcherPriority.Render, () =>
+            {
+                if (_regionBox.SelectedIndex == probeIndex)
+                {
+                    _regionBox.SelectedIndex = originalIndex;
+                }
+            });
+        });
     }
 
     private FrameworkElement FormRow(string label, FrameworkElement input)
