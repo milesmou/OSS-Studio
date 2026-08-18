@@ -44,6 +44,7 @@ public sealed class OssMainWindow : Window
     private readonly Dictionary<TabItem, string> _bucketIdsByTab = [];
     private readonly Dictionary<string, TreeViewNode> _bucketNodesById = [];
     private readonly Dictionary<string, GridView> _objectViews = [];
+    private readonly Dictionary<string, ObjectListLoadingIndicator> _objectLoadingIndicators = [];
     private readonly Dictionary<string, ObservableValue<string>> _statusTexts = [];
     private readonly Dictionary<string, ObservableValue<string>> _pathTexts = [];
     private readonly Dictionary<string, string> _searchTexts = [];
@@ -591,6 +592,9 @@ public sealed class OssMainWindow : Window
         objectView.OnMouseDown(args => HandleObjectViewMouseDown(objectView, bucket, args));
         _objectViews[bucket.Id] = objectView;
 
+        var loadingIndicator = new ObjectListLoadingIndicator(ObjectListSurface, BorderColor, Teal);
+        _objectLoadingIndicators[bucket.Id] = loadingIndicator;
+
         var headerCheckBox = new CheckBox
         {
             IsThreeState = true,
@@ -626,7 +630,7 @@ public sealed class OssMainWindow : Window
             .Background(ObjectListSurface)
             .BorderBrush(Color.White.WithAlpha(0))
             .BorderThickness(2)
-            .Child(new Grid().Children(objectView, headerSelector));
+            .Child(new Grid().Children(objectView, headerSelector, loadingIndicator.View));
         ConfigureDropUpload(dropSurface, bucket, objectView, headerSelector);
 
         var bookmarkButton = BrowserToolbarButton(
@@ -719,6 +723,10 @@ public sealed class OssMainWindow : Window
         _tabs.RemoveTabAt(index);
         _bucketIdsByTab.Remove(pair.Key);
         _objectViews.Remove(bucketId);
+        if (_objectLoadingIndicators.Remove(bucketId, out var loadingIndicator))
+        {
+            loadingIndicator.Stop();
+        }
         _statusTexts.Remove(bucketId);
         _pathTexts.Remove(bucketId);
         _searchTexts.Remove(bucketId);
@@ -818,6 +826,7 @@ public sealed class OssMainWindow : Window
         currentView.ItemsSource(Array.Empty<ObjectEntry>());
         UpdateHeaderCheckBox(bucket.Id);
         SetStatus(bucket.Id, "正在从 OSS 加载对象列表…");
+        StartObjectListLoading(bucket.Id);
         try
         {
             var credential = LoadCredential(bucket.Id);
@@ -891,6 +900,27 @@ public sealed class OssMainWindow : Window
             var message = $"加载失败：{exception.Message}";
             SetStatus(bucket.Id, message);
             this.ShowToast(message);
+        }
+        finally
+        {
+            StopObjectListLoading(bucket.Id, refreshVersion);
+        }
+    }
+
+    private void StartObjectListLoading(string bucketId)
+    {
+        if (_objectLoadingIndicators.TryGetValue(bucketId, out var loadingIndicator))
+        {
+            loadingIndicator.Start();
+        }
+    }
+
+    private void StopObjectListLoading(string bucketId, int refreshVersion)
+    {
+        if (_tabStates.GetValueOrDefault(bucketId)?.RefreshVersion == refreshVersion &&
+            _objectLoadingIndicators.TryGetValue(bucketId, out var loadingIndicator))
+        {
+            loadingIndicator.Stop();
         }
     }
 
@@ -3152,6 +3182,79 @@ public sealed class OssMainWindow : Window
 
     private void SaveWorkspace()
         => _stateStore.Save(_state);
+
+    private sealed class ObjectListLoadingIndicator
+    {
+        private readonly Color _activeColor;
+        private readonly Color _inactiveColor;
+        private readonly TextBlock[] _dots;
+        private readonly DispatcherTimer _timer;
+        private int _activeDot;
+
+        public ObjectListLoadingIndicator(Color background, Color frame, Color accent)
+        {
+            _activeColor = accent;
+            _inactiveColor = accent.WithAlpha(55);
+            _dots =
+            [
+                CreateDot(_activeColor),
+                CreateDot(_inactiveColor),
+                CreateDot(_inactiveColor)
+            ];
+            _timer = new DispatcherTimer()
+                .IntervalMs(180)
+                .OnTick(Advance);
+
+            View = new Border()
+                .Height(38)
+                .Margin(0, 38, 0, 0)
+                .VerticalAlignment(VerticalAlignment.Top)
+                .Background(background)
+                .BorderBrush(frame)
+                .BorderThickness(new Thickness(1, 1, 1, 0))
+                .Child(
+                    new StackPanel()
+                        .Horizontal()
+                        .Spacing(6)
+                        .Center()
+                        .Children(_dots))
+                .IsVisible(false);
+            View.IsHitTestVisible = false;
+        }
+
+        public Border View { get; }
+
+        public void Start()
+        {
+            _activeDot = 0;
+            UpdateDots();
+            View.IsVisible(true);
+            _timer.Start();
+        }
+
+        public void Stop()
+        {
+            _timer.Stop();
+            View.IsVisible(false);
+        }
+
+        private static TextBlock CreateDot(Color color)
+            => new TextBlock().Text("●").FontSize(10).Foreground(color);
+
+        private void Advance()
+        {
+            _activeDot = (_activeDot + 1) % _dots.Length;
+            UpdateDots();
+        }
+
+        private void UpdateDots()
+        {
+            for (var index = 0; index < _dots.Length; index++)
+            {
+                _dots[index].Foreground = index == _activeDot ? _activeColor : _inactiveColor;
+            }
+        }
+    }
 
     private sealed class ObjectActionCell : StackPanel
     {
