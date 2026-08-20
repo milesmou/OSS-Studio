@@ -3042,6 +3042,7 @@ public sealed class OssMainWindow : Window
             .Item("下载", () => _ = DownloadEntryAsync(bucket.Id, entry))
             .Item("复制", () => _ = CopySelectedAsync(bucket.Id, [entry]))
             .Item("移动", () => _ = MoveEntryAsync(bucket.Id, entry))
+            .Item("删除", () => _ = DeleteEntryAsync(bucket.Id, entry))
             .Item("重命名", () => _ = RenameEntryAsync(bucket.Id, entry));
         if (!entry.IsFolder)
         {
