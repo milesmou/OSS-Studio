@@ -25,8 +25,6 @@ public sealed class OssMainWindow : Window
     private readonly Color Coral;
     private const string AppIconResourceName = "OSSStudio.Assets.OSS-Studio.ico";
     private const string AppLogoResourceName = "OSSStudio.Assets.OSS-Studio.png";
-    private const long ObjectDoubleClickIntervalMilliseconds = 250;
-
     private readonly WorkspaceState _state;
     private readonly WorkspaceStateStore _stateStore;
     private readonly BucketCredentialStore _credentialStore = new();
@@ -306,21 +304,22 @@ public sealed class OssMainWindow : Window
 
         var index = _state.Buckets.FindIndex(item => item.Id == bucket.Id);
         var menu = new ContextMenu()
-            .Item("编辑资源桶", EditSelectedBucket);
+            .ActionItem("编辑资源桶", EditSelectedBucket)
+            .ActionItem("自定义显示名称", CustomizeSelectedBucketName);
         if (_state.Buckets.Count > 1)
         {
             menu.Separator();
             if (index > 0)
             {
-                menu.Item("上移", () => MoveSelectedBucket(-1));
+                menu.ActionItem("上移", () => MoveSelectedBucket(-1));
             }
             if (index >= 0 && index < _state.Buckets.Count - 1)
             {
-                menu.Item("下移", () => MoveSelectedBucket(1));
+                menu.ActionItem("下移", () => MoveSelectedBucket(1));
             }
         }
         menu.Separator()
-            .Item("删除资源桶", DeleteSelectedBucket);
+            .ActionItem("删除资源桶", DeleteSelectedBucket);
 
         _bucketContextMenu = menu;
         menu.ShowAt(_bucketTree, ScreenToClient(args.ScreenPosition));
@@ -349,6 +348,49 @@ public sealed class OssMainWindow : Window
         _suppressBucketOpen = false;
         SaveWorkspace();
         SetStatus(bucket.Id, $"已{(offset < 0 ? "上移" : "下移")}资源桶：{bucket.Name}");
+    }
+
+    private async void CustomizeSelectedBucketName()
+    {
+        var bucket = GetSelectedBucket();
+        if (bucket is null)
+        {
+            return;
+        }
+
+        var prompt = new TextPromptOverlay(
+            "自定义资源桶显示名称",
+            "输入本地显示名称；留空会恢复为真实 Bucket 名称。",
+            "资源桶显示名称",
+            bucket.DisplayName,
+            validate: _ => null);
+        var displayName = await prompt.ShowAsync(this);
+        if (displayName is null)
+        {
+            return;
+        }
+
+        var index = _state.Buckets.FindIndex(item => item.Id == bucket.Id);
+        if (index < 0)
+        {
+            return;
+        }
+
+        var updated = bucket with { DisplayName = displayName.Trim() };
+        _state.Buckets[index] = updated;
+        _suppressBucketOpen = true;
+        try
+        {
+            _bucketTree.ItemsSource(CreateBucketNodes());
+            _bucketTree.SelectedNode = _bucketNodesById[updated.Id];
+        }
+        finally
+        {
+            _suppressBucketOpen = false;
+        }
+
+        SaveWorkspace();
+        SetStatus(updated.Id, "已更新资源桶显示名称");
     }
 
     private void OpenSelectedBookmark()
@@ -469,22 +511,22 @@ public sealed class OssMainWindow : Window
 
         var index = _state.Bookmarks.FindIndex(item => item.Id == bookmark.Id);
         var menu = new ContextMenu()
-            .Item("打开书签", OpenSelectedBookmark)
-            .Item("自定义显示名称", CustomizeSelectedBookmarkName);
+            .ActionItem("打开书签", OpenSelectedBookmark)
+            .ActionItem("自定义显示名称", CustomizeSelectedBookmarkName);
         if (_state.Bookmarks.Count > 1)
         {
             menu.Separator();
             if (index > 0)
             {
-                menu.Item("上移", () => MoveSelectedBookmark(-1));
+                menu.ActionItem("上移", () => MoveSelectedBookmark(-1));
             }
             if (index >= 0 && index < _state.Bookmarks.Count - 1)
             {
-                menu.Item("下移", () => MoveSelectedBookmark(1));
+                menu.ActionItem("下移", () => MoveSelectedBookmark(1));
             }
         }
         menu.Separator()
-            .Item("删除书签", DeleteSelectedBookmark);
+            .ActionItem("删除书签", DeleteSelectedBookmark);
 
         _bookmarkContextMenu = menu;
         menu.ShowAt(_bookmarkScrollViewer, ScreenToClient(args.ScreenPosition));
@@ -684,6 +726,13 @@ public sealed class OssMainWindow : Window
             .ItemsSource(bucket.Objects)
             .Columns(CreateObjectColumns(bucket.Id, nameColumnWidth));
         objectView.CellPadding = new Thickness(0);
+        objectView.ItemDoubleClicked += item =>
+        {
+            if (item is ObjectEntry entry)
+            {
+                HandleObjectDoubleClick(bucket, entry);
+            }
+        };
         objectView.OnMouseDown(args => HandleObjectViewMouseDown(objectView, bucket, args));
         _objectViews[bucket.Id] = objectView;
 
@@ -912,7 +961,6 @@ public sealed class OssMainWindow : Window
 
         var tabState = GetTabState(bucket);
         var refreshVersion = ++tabState.RefreshVersion;
-        tabState.LastObjectClick = null;
         var prefix = tabState.CurrentPrefix;
         tabState.SelectedEntry = null;
         ClearCheckedObjects(bucket.Id);
@@ -1173,7 +1221,11 @@ public sealed class OssMainWindow : Window
             return;
         }
 
-        _state.Buckets[index] = result with { Objects = bucket.Objects };
+        _state.Buckets[index] = result with
+        {
+            Objects = bucket.Objects,
+            DisplayName = bucket.DisplayName
+        };
         ReloadBucketViews();
         SetStatus(bucket.Id, $"已更新资源桶：{result.Name}");
         SaveWorkspace();
@@ -1317,11 +1369,16 @@ public sealed class OssMainWindow : Window
         _bucketNodesById.Clear();
         return _state.Buckets.Select(bucket =>
         {
-            var node = new TreeViewNode($"▰  {bucket.Name}", tag: bucket);
+            var node = new TreeViewNode($"▰  {GetBucketDisplayName(bucket)}", tag: bucket);
             _bucketNodesById[bucket.Id] = node;
             return node;
         }).ToArray();
     }
+
+    private static string GetBucketDisplayName(BucketProfile bucket)
+        => string.IsNullOrWhiteSpace(bucket.DisplayName)
+            ? bucket.Name
+            : bucket.DisplayName.Trim();
 
     private static string GetBookmarkDisplayText(DirectoryBookmark bookmark, BucketProfile bucket)
     {
@@ -1458,7 +1515,7 @@ public sealed class OssMainWindow : Window
                 cancellation = transferTask.Cancellation;
                 var progress = new Progress<(int Current, int Total, string Name)>(value =>
                 {
-                    if (!transferTask.IsRunning)
+                    if (!transferTask.IsRunning || transferTask.IsCancellationPending)
                     {
                         return;
                     }
@@ -1662,7 +1719,7 @@ public sealed class OssMainWindow : Window
         {
             var progress = new Progress<(int Current, int Total, string Name)>(value =>
             {
-                if (!transferTask.IsRunning)
+                if (!transferTask.IsRunning || transferTask.IsCancellationPending)
                 {
                     return;
                 }
@@ -2310,7 +2367,7 @@ public sealed class OssMainWindow : Window
 
     private void UpdateTransferTask(TransferTaskInfo task, int current, int total, string detail)
     {
-        if (!task.IsRunning)
+        if (!task.IsRunning || task.IsCancellationPending)
         {
             return;
         }
@@ -2318,7 +2375,7 @@ public sealed class OssMainWindow : Window
         task.Current = current;
         task.Total = total;
         task.Detail = detail;
-        RefreshTransferTasksOverlay();
+        _transferTasksOverlay?.UpdateTask(task);
     }
 
     private void FinishTransferTask(
@@ -2339,7 +2396,7 @@ public sealed class OssMainWindow : Window
         {
             task.Total = total.Value;
         }
-        RefreshTransferTasksOverlay();
+        _transferTasksOverlay?.UpdateTask(task);
     }
 
     private void EndTransfer(string bucketId, CancellationTokenSource cancellation)
@@ -2356,16 +2413,32 @@ public sealed class OssMainWindow : Window
     private void CancelTransferTask(Guid taskId)
     {
         var task = _transferTasks.FirstOrDefault(item => item.Id == taskId);
-        if (task is null || !task.IsRunning || task.Cancellation.IsCancellationRequested)
+        if (task is null || !task.IsRunning || task.IsCancellationPending)
         {
             return;
         }
 
-        task.Cancellation.Cancel();
         task.State = "取消中";
         task.Detail = "正在取消任务…";
         SetStatus(task.BucketId, $"正在取消{task.Operation}任务…");
-        RefreshTransferTasksOverlay();
+        _transferTasksOverlay?.UpdateTask(task);
+        _ = CancelTransferTaskAsync(task);
+    }
+
+    private async Task CancelTransferTaskAsync(TransferTaskInfo task)
+    {
+        try
+        {
+            await task.Cancellation.CancelAsync();
+        }
+        catch (Exception exception)
+        {
+            if (task.IsRunning)
+            {
+                FinishTransferTask(task, "失败", $"取消任务失败：{exception.Message}");
+                SetStatus(task.BucketId, $"取消{task.Operation}任务失败：{exception.Message}");
+            }
+        }
     }
 
     private void RetryTransferTask(Guid taskId)
@@ -2763,7 +2836,7 @@ public sealed class OssMainWindow : Window
             SetStatus(bucket.Id, "正在准备拖拽上传…");
             var progress = new Progress<(int Current, int Total, string Name)>(value =>
             {
-                if (!transferTask.IsRunning)
+                if (!transferTask.IsRunning || transferTask.IsCancellationPending)
                 {
                     return;
                 }
@@ -2832,7 +2905,8 @@ public sealed class OssMainWindow : Window
                     build: _ => CreateRowCell(
                         bucketId,
                         new ObjectSelectionCell(),
-                        horizontalPadding: 0),
+                        horizontalPadding: 0,
+                        primaryMouseDown: ToggleBoundObjectSelection),
                     bind: (Border cell, ObjectEntry entry) =>
                     {
                         BindRowCell(cell, bucketId, entry.Key);
@@ -2846,7 +2920,11 @@ public sealed class OssMainWindow : Window
                 .Width(150)
                 .IsResizable(false)
                 .Template(
-                    build: _ => CreateRowCell(bucketId, CreateObjectActionCell(bucketId), horizontalPadding: 12),
+                    build: _ => CreateRowCell(
+                        bucketId,
+                        CreateObjectActionCell(bucketId),
+                        horizontalPadding: 12,
+                        suppressPrimaryMouseInput: true),
                     bind: (Border cell, ObjectEntry entry) =>
                     {
                         BindRowCell(cell, bucketId, entry.Key);
@@ -2888,7 +2966,9 @@ public sealed class OssMainWindow : Window
     private Border CreateRowCell(
         string bucketId,
         FrameworkElement content,
-        double horizontalPadding)
+        double horizontalPadding,
+        Action<Border>? primaryMouseDown = null,
+        bool suppressPrimaryMouseInput = false)
     {
         var cell = new Border()
             .Padding(horizontalPadding, 0)
@@ -2899,7 +2979,32 @@ public sealed class OssMainWindow : Window
         cell
             .OnMouseEnter(() => SetRowCellHover(cell, true))
             .OnMouseLeave(() => SetRowCellHover(cell, false));
+        if (primaryMouseDown is not null || suppressPrimaryMouseInput)
+        {
+            cell.OnMouseDown(args =>
+            {
+                if (args.Button != MouseButton.Left)
+                {
+                    return;
+                }
+
+                primaryMouseDown?.Invoke(cell);
+                args.Handled = true;
+            });
+        }
         return cell;
+    }
+
+    private void ToggleBoundObjectSelection(Border cell)
+    {
+        if (!_rowCellAssignments.TryGetValue(cell, out var assignment) ||
+            FindBucket(assignment.BucketId) is not { } bucket ||
+            bucket.Objects.FirstOrDefault(entry => entry.Key == assignment.Key) is not { } entry)
+        {
+            return;
+        }
+
+        ToggleObjectSelection(bucket, entry);
     }
 
     private void BindRowCell(Border cell, string bucketId, string key)
@@ -3061,31 +3166,16 @@ public sealed class OssMainWindow : Window
             : $"已选中：{entry.Name} · 当前已选 {selectedCount} 个");
     }
 
-    private void HandleObjectRowClick(BucketProfile bucket, ObjectEntry entry)
+    private void HandleObjectDoubleClick(BucketProfile bucket, ObjectEntry entry)
     {
-        var now = Environment.TickCount64;
-        var isDoubleClick =
-            GetTabState(bucket).LastObjectClick is { } previousClick &&
-            string.Equals(previousClick.Key, entry.Key, StringComparison.Ordinal) &&
-            now - previousClick.Timestamp is >= 0 and <= ObjectDoubleClickIntervalMilliseconds;
-
-        if (isDoubleClick)
+        if (entry.IsFolder)
         {
-            GetTabState(bucket).LastObjectClick = null;
-            if (entry.IsFolder)
-            {
-                _ = NavigateToPrefixAsync(bucket, entry.Key);
-            }
-            else
-            {
-                _ = OpenFilePreviewAsync(bucket, entry);
-            }
-
-            return;
+            _ = NavigateToPrefixAsync(bucket, entry.Key);
         }
-
-        GetTabState(bucket).LastObjectClick = (entry.Key, now);
-        ToggleObjectSelection(bucket, entry);
+        else
+        {
+            _ = OpenFilePreviewAsync(bucket, entry);
+        }
     }
 
     private void HandleObjectViewMouseDown(GridView objectView, BucketProfile bucket, MouseEventArgs args)
@@ -3101,7 +3191,6 @@ public sealed class OssMainWindow : Window
         {
             var tabState = GetTabState(bucket);
             tabState.SelectedEntry = entry;
-            tabState.LastObjectClick = null;
             if (!tabState.CheckedObjectKeys.Contains(entry.Key))
             {
                 SetObjectChecked(bucket.Id, entry, true);
@@ -3111,20 +3200,12 @@ public sealed class OssMainWindow : Window
             return;
         }
 
-        if (args.Button != MouseButton.Left || columnIndex >= 4)
+        if (args.Button != MouseButton.Left || columnIndex is 0 or >= 4 || args.ClickCount >= 2)
         {
             return;
         }
 
-        if (columnIndex == 0)
-        {
-            GetTabState(bucket).LastObjectClick = null;
-            ToggleObjectSelection(bucket, entry);
-        }
-        else
-        {
-            HandleObjectRowClick(bucket, entry);
-        }
+        ToggleObjectSelection(bucket, entry);
     }
 
     private void ShowObjectContextMenu(
@@ -3134,18 +3215,18 @@ public sealed class OssMainWindow : Window
         MouseEventArgs args)
     {
         var menu = new ContextMenu()
-            .Item("下载", () => _ = DownloadEntryAsync(bucket.Id, entry))
-            .Item("复制", () => _ = CopySelectedAsync(bucket.Id, [entry]))
-            .Item("移动", () => _ = MoveEntryAsync(bucket.Id, entry))
-            .Item("删除", () => _ = DeleteEntryAsync(bucket.Id, entry))
-            .Item("重命名", () => _ = RenameEntryAsync(bucket.Id, entry));
+            .ActionItem("下载", () => _ = DownloadEntryAsync(bucket.Id, entry))
+            .ActionItem("复制", () => _ = CopySelectedAsync(bucket.Id, [entry]))
+            .ActionItem("移动", () => _ = MoveEntryAsync(bucket.Id, entry))
+            .ActionItem("删除", () => _ = DeleteEntryAsync(bucket.Id, entry))
+            .ActionItem("重命名", () => _ = RenameEntryAsync(bucket.Id, entry));
         if (!entry.IsFolder)
         {
-            menu.Separator().Item("获取地址", () => CopyObjectAddress(bucket.Id, entry));
+            menu.Separator().ActionItem("获取地址", () => CopyObjectAddress(bucket.Id, entry));
         }
         else
         {
-            menu.Separator().Item("添加到书签", () => AddBookmark(bucket, entry.Key));
+            menu.Separator().ActionItem("添加到书签", () => AddBookmark(bucket, entry.Key));
         }
 
         _objectContextMenu = menu;
@@ -3281,25 +3362,15 @@ public sealed class OssMainWindow : Window
 
     private sealed class ObjectListLoadingIndicator
     {
-        private readonly Color _activeColor;
-        private readonly Color _inactiveColor;
-        private readonly TextBlock[] _dots;
-        private readonly DispatcherTimer _timer;
-        private int _activeDot;
-
         public ObjectListLoadingIndicator(Color background, Color frame, Color accent)
         {
-            _activeColor = accent;
-            _inactiveColor = accent.WithAlpha(55);
-            _dots =
-            [
-                CreateDot(_activeColor),
-                CreateDot(_inactiveColor),
-                CreateDot(_inactiveColor)
-            ];
-            _timer = new DispatcherTimer()
-                .IntervalMs(180)
-                .OnTick(Advance);
+            var progress = new ProgressBar
+            {
+                IsIndeterminate = true,
+                Width = 180,
+                Height = 6,
+                Foreground = accent
+            };
 
             View = new Border()
                 .Height(38)
@@ -3308,12 +3379,7 @@ public sealed class OssMainWindow : Window
                 .Background(background)
                 .BorderBrush(frame)
                 .BorderThickness(new Thickness(1, 1, 1, 0))
-                .Child(
-                    new StackPanel()
-                        .Horizontal()
-                        .Spacing(6)
-                        .Center()
-                        .Children(_dots))
+                .Child(progress.Center())
                 .IsVisible(false);
             View.IsHitTestVisible = false;
         }
@@ -3322,33 +3388,12 @@ public sealed class OssMainWindow : Window
 
         public void Start()
         {
-            _activeDot = 0;
-            UpdateDots();
             View.IsVisible(true);
-            _timer.Start();
         }
 
         public void Stop()
         {
-            _timer.Stop();
             View.IsVisible(false);
-        }
-
-        private static TextBlock CreateDot(Color color)
-            => new TextBlock().Text("●").FontSize(10).Foreground(color);
-
-        private void Advance()
-        {
-            _activeDot = (_activeDot + 1) % _dots.Length;
-            UpdateDots();
-        }
-
-        private void UpdateDots()
-        {
-            for (var index = 0; index < _dots.Length; index++)
-            {
-                _dots[index].Foreground = index == _activeDot ? _activeColor : _inactiveColor;
-            }
         }
     }
 

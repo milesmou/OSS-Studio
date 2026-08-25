@@ -29,6 +29,9 @@ internal sealed class TransferTaskInfo(
 
     public bool IsRunning { get; set; } = true;
 
+    public bool IsCancellationPending =>
+        State == "取消中" || Cancellation.IsCancellationRequested;
+
     public Func<Task>? RetryAsync { get; set; }
 
     public bool CanRetry { get; set; } = true;

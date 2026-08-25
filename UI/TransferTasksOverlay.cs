@@ -14,6 +14,7 @@ internal sealed class TransferTasksOverlay : ContentControl
     private readonly Color Blue;
 
     private readonly StackPanel _taskList = new StackPanel().Vertical().Spacing(10);
+    private readonly Dictionary<Guid, TaskCard> _taskCards = [];
     private readonly Action<Guid> _cancelTask;
     private readonly Action<Guid> _retryTask;
     private readonly Action _clearFinished;
@@ -77,6 +78,7 @@ internal sealed class TransferTasksOverlay : ContentControl
         {
             _taskList.RemoveAt(0);
         }
+        _taskCards.Clear();
         if (tasks.Count == 0)
         {
             _taskList.Add(
@@ -99,7 +101,17 @@ internal sealed class TransferTasksOverlay : ContentControl
 
         foreach (var task in tasks)
         {
-            _taskList.Add(BuildTaskCard(task));
+            var card = BuildTaskCard(task);
+            _taskCards[task.Id] = card;
+            _taskList.Add(card.View);
+        }
+    }
+
+    public void UpdateTask(TransferTaskInfo task)
+    {
+        if (_taskCards.TryGetValue(task.Id, out var card))
+        {
+            UpdateTaskCard(card, task);
         }
     }
 
@@ -164,81 +176,34 @@ internal sealed class TransferTasksOverlay : ContentControl
                             .WithFeedback("关闭传输任务", Teal.WithAlpha(38), Teal.WithAlpha(58), Teal.WithAlpha(88))));
     }
 
-    private FrameworkElement BuildTaskCard(TransferTaskInfo task)
+    private TaskCard BuildTaskCard(TransferTaskInfo task)
     {
-        var statusColor = task.State switch
-        {
-            "已完成" => Teal,
-            "已取消" => MutedText,
-            "失败" => Coral,
-            _ => Blue
-        };
-
-        Button action;
-        if (task.IsRunning)
-        {
-            action = new Button()
-                .Content(task.Cancellation.IsCancellationRequested ? "取消中…" : "取消", accessKey: false)
-                .Padding(12, 6)
-                .CornerRadius(5)
-                .Background(Coral.WithAlpha(32))
-                .BorderBrush(Coral.WithAlpha(100))
-                .Foreground(Coral)
-                .OnClick(() => _cancelTask(task.Id))
-                .WithFeedback("取消此传输任务", Coral.WithAlpha(32), Coral.WithAlpha(52), Coral.WithAlpha(82));
-            action.IsEnabled = !task.Cancellation.IsCancellationRequested;
-        }
-        else if (task.State == "失败" && task.RetryAsync is not null && task.CanRetry)
-        {
-            action = new Button()
-                .Content("重试", accessKey: false)
-                .Padding(12, 6)
-                .CornerRadius(5)
-                .Background(Blue.WithAlpha(32))
-                .BorderBrush(Blue.WithAlpha(100))
-                .Foreground(Blue)
-                .OnClick(() => _retryTask(task.Id))
-                .WithFeedback("重新执行此传输任务", Blue.WithAlpha(32), Blue.WithAlpha(52), Blue.WithAlpha(82));
-        }
-        else
-        {
-            action = new Button()
-                .Content(task.State, accessKey: false)
-                .StyleName(BuiltInStyles.FlatButton)
-                .Padding(12, 6)
-                .Foreground(statusColor);
-            action.IsEnabled = false;
-        }
-
-        var progress = new ProgressBar
-        {
-            Minimum = 0,
-            Maximum = 100,
-            Value = task.ProgressPercent,
-            Height = 6,
-            Foreground = statusColor
-        };
-
-        var heading = new StackPanel()
-            .Horizontal()
-            .Spacing(8)
-            .Children(
-                new TextBlock().Text(task.Operation).Bold().Foreground(statusColor),
-                new TextBlock().Text(task.Title).Bold(),
-                new TextBlock().Text($"· {task.BucketName}").Foreground(MutedText));
+        var operation = new TextBlock().Text(task.Operation).Bold();
+        var title = new TextBlock().Text(task.Title).Bold();
+        var bucketName = new TextBlock().Text($"· {task.BucketName}").Foreground(MutedText);
         var detail = new TextBlock()
-            .Text(task.ProgressText)
             .FontSize(12)
             .Foreground(MutedText)
             .TextTrimming(TextTrimming.CharacterEllipsis)
             .Margin(0, 7, 18, 7);
+        var progress = new ProgressBar
+        {
+            Minimum = 0,
+            Maximum = 100,
+            Height = 6
+        };
         progress.Margin = new Thickness(0, 0, 18, 0);
-        Grid.SetColumn(action, 1);
-        Grid.SetRowSpan(action, 3);
+        var actionHost = new ContentControl().CenterVertical();
+        Grid.SetColumn(actionHost, 1);
+        Grid.SetRowSpan(actionHost, 3);
         Grid.SetRow(detail, 1);
         Grid.SetRow(progress, 2);
 
-        return new Border()
+        var heading = new StackPanel()
+            .Horizontal()
+            .Spacing(8)
+            .Children(operation, title, bucketName);
+        var view = new Border()
             .Padding(14, 12)
             .CornerRadius(7)
             .Background(PanelSurface)
@@ -250,10 +215,93 @@ internal sealed class TransferTasksOverlay : ContentControl
                     .Rows("Auto,Auto,Auto")
                     .Children(
                         heading,
-                        action.CenterVertical(),
+                        actionHost,
                         detail,
                         progress));
+        var card = new TaskCard(view, operation, detail, progress, actionHost);
+        UpdateTaskCard(card, task);
+        return card;
     }
+
+    private void UpdateTaskCard(TaskCard card, TransferTaskInfo task)
+    {
+        var statusColor = GetStatusColor(task);
+        card.Operation.Foreground = statusColor;
+        card.Detail.Text = task.ProgressText;
+        card.Progress.Value = task.ProgressPercent;
+        card.Progress.IsIndeterminate = task.IsRunning && task.Total <= 0;
+        card.Progress.Foreground = statusColor;
+
+        var isCancelling = task.IsCancellationPending;
+        var actionKey = task.IsRunning
+            ? isCancelling ? "cancelling" : "cancel"
+            : task.State == "失败" && task.RetryAsync is not null && task.CanRetry
+                ? "retry"
+                : task.State;
+        if (card.ActionKey == "cancel" && actionKey == "cancelling" &&
+            card.ActionHost.Content is Button cancelButton)
+        {
+            card.ActionKey = actionKey;
+            cancelButton.Content("取消中…", accessKey: false);
+            cancelButton.IsEnabled = false;
+            return;
+        }
+
+        if (!string.Equals(card.ActionKey, actionKey, StringComparison.Ordinal))
+        {
+            card.ActionKey = actionKey;
+            card.ActionHost.Content = BuildTaskAction(task, statusColor);
+        }
+    }
+
+    private Button BuildTaskAction(TransferTaskInfo task, Color statusColor)
+    {
+        if (task.IsRunning)
+        {
+            var isCancelling = task.IsCancellationPending;
+            var action = new Button()
+                .Content(isCancelling ? "取消中…" : "取消", accessKey: false)
+                .Padding(12, 6)
+                .CornerRadius(5)
+                .Background(Coral.WithAlpha(32))
+                .BorderBrush(Coral.WithAlpha(100))
+                .Foreground(Coral)
+                .OnClick(() => _cancelTask(task.Id))
+                .WithFeedback("取消此传输任务", Coral.WithAlpha(32), Coral.WithAlpha(52), Coral.WithAlpha(82));
+            action.IsEnabled = !isCancelling;
+            return action;
+        }
+
+        if (task.State == "失败" && task.RetryAsync is not null && task.CanRetry)
+        {
+            return new Button()
+                .Content("重试", accessKey: false)
+                .Padding(12, 6)
+                .CornerRadius(5)
+                .Background(Blue.WithAlpha(32))
+                .BorderBrush(Blue.WithAlpha(100))
+                .Foreground(Blue)
+                .OnClick(() => _retryTask(task.Id))
+                .WithFeedback("重新执行此传输任务", Blue.WithAlpha(32), Blue.WithAlpha(52), Blue.WithAlpha(82));
+        }
+
+        var completedAction = new Button()
+            .Content(task.State, accessKey: false)
+            .StyleName(BuiltInStyles.FlatButton)
+            .Padding(12, 6)
+            .Foreground(statusColor);
+        completedAction.IsEnabled = false;
+        return completedAction;
+    }
+
+    private Color GetStatusColor(TransferTaskInfo task)
+        => task.State switch
+        {
+            "已完成" => Teal,
+            "已取消" => MutedText,
+            "失败" => Coral,
+            _ => Blue
+        };
 
     private void Close()
     {
@@ -264,5 +312,25 @@ internal sealed class TransferTasksOverlay : ContentControl
         }
 
         _closed();
+    }
+
+    private sealed class TaskCard(
+        Border view,
+        TextBlock operation,
+        TextBlock detail,
+        ProgressBar progress,
+        ContentControl actionHost)
+    {
+        public Border View { get; } = view;
+
+        public TextBlock Operation { get; } = operation;
+
+        public TextBlock Detail { get; } = detail;
+
+        public ProgressBar Progress { get; } = progress;
+
+        public ContentControl ActionHost { get; } = actionHost;
+
+        public string ActionKey { get; set; } = string.Empty;
     }
 }

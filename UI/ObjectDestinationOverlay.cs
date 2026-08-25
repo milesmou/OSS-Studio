@@ -332,11 +332,11 @@ internal sealed class ObjectDestinationOverlay : ContentControl
         _directoryTree.SelectedNode = visibleNodes[index];
         UpdateSelectedDirectory(_bucketName);
         var menu = new ContextMenu()
-            .Item("新建目录", () => _ = CreateDirectoryAsync(prefix));
+            .ActionItem("新建目录", () => _ = CreateDirectoryAsync(prefix));
         if (!string.Equals(prefix, _rootPrefix, StringComparison.Ordinal))
         {
-            menu.Item("重命名目录", () => _ = RenameDirectoryAsync(prefix))
-                .Item("删除目录", () => _ = DeleteDirectoryAsync(prefix));
+            menu.ActionItem("重命名目录", () => _ = RenameDirectoryAsync(prefix))
+                .ActionItem("删除目录", () => _ = DeleteDirectoryAsync(prefix));
         }
         menu.ShowAt(_directoryTree, _owner.ScreenToClient(args.ScreenPosition));
         args.Handled = true;

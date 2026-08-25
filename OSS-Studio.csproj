@@ -13,7 +13,7 @@
 
   <ItemGroup>
     <PackageReference Include="AlibabaCloud.OSS.V2" Version="0.2.0" />
-    <PackageReference Include="Aprillz.MewUI.Windows" Version="0.19.1" />
+    <PackageReference Include="Aprillz.MewUI.Windows" Version="0.20.1" />
     <TrimmerRootAssembly Include="AlibabaCloud.OSS.V2" />
   </ItemGroup>
 

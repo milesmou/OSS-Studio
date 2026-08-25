@@ -78,6 +78,14 @@ public sealed class WorkspaceStateStore
             "bucket-audit-archive" or
             "bucket-test-assets" or
             "bucket-test-logs");
+        for (var index = 0; index < state.Buckets.Count; index++)
+        {
+            var bucket = state.Buckets[index];
+            state.Buckets[index] = bucket with
+            {
+                DisplayName = bucket.DisplayName ?? string.Empty
+            };
+        }
 
         var bucketIds = state.Buckets.Select(bucket => bucket.Id).ToHashSet();
         state.OpenBucketIds.RemoveAll(id => !bucketIds.Contains(id));

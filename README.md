@@ -14,6 +14,7 @@ OSS Studio 是一款面向阿里云 OSS 的 Windows 桌面客户端，使用 C#�
 - 多标签页浏览资源桶，并恢复上次打开的工作区。
 - 单实例运行：重复启动时激活已经打开的窗口。
 - 左侧资源桶与书签区域按 1:1 布局。
+- 左侧资源桶列表支持自定义本地显示名称，不影响真实 Bucket 名称和 OSS 请求。
 
 > 删除资源桶只会删除本地配置和本地凭据，不会删除 OSS 上的真实 Bucket。
 
@@ -163,7 +164,7 @@ publish.cmd  NativeAOT 单文件发布脚本
 ## 技术说明
 
 - 目标框架：.NET 10。
-- UI：Aprillz.MewUI 0.19.1，Direct2D 后端。
+- UI：Aprillz.MewUI 0.20.1，Direct2D 后端。
 - OSS SDK：AlibabaCloud.OSS.V2 0.2.0。
 - 发布方式：Windows x64 NativeAOT、自包含、完整裁剪、单文件。
 - 工作区 JSON 使用源生成序列化上下文，适配 NativeAOT 和完整裁剪。

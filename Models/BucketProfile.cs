@@ -17,7 +17,8 @@ public sealed record BucketProfile
         string note = "",
         bool keepLogin = true,
         bool rememberSecret = true,
-        string endpointMode = "Default")
+        string endpointMode = "Default",
+        string displayName = "")
     {
         Id = id;
         Name = name;
@@ -32,6 +33,7 @@ public sealed record BucketProfile
         KeepLogin = keepLogin;
         RememberSecret = rememberSecret;
         EndpointMode = endpointMode;
+        DisplayName = displayName;
     }
 
     public string Id { get; init; }
@@ -50,4 +52,5 @@ public sealed record BucketProfile
     public bool KeepLogin { get; init; }
     public bool RememberSecret { get; init; }
     public string EndpointMode { get; init; }
+    public string DisplayName { get; init; }
 }

@@ -18,8 +18,6 @@ internal sealed class BucketTabState(string rootPrefix)
 
     public int RefreshVersion { get; set; }
 
-    public (string Key, long Timestamp)? LastObjectClick { get; set; }
-
     public CancellationTokenSource? TransferCancellation { get; set; }
 
     public bool IsTransferRunning => TransferCancellation is not null;
@@ -29,6 +27,5 @@ internal sealed class BucketTabState(string rootPrefix)
         SelectedEntry = null;
         CheckedObjectKeys.Clear();
         HoveredObjectKey = null;
-        LastObjectClick = null;
     }
 }
