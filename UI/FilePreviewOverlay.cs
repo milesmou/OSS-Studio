@@ -13,7 +13,6 @@ internal enum FilePreviewKind
 internal sealed class FilePreviewOverlay : ContentControl
 {
     private const double MinimumImageScale = 0.05;
-    private const double MaximumImageScale = 8;
     private const double ImageZoomStep = 1.1;
 
     private readonly ContentControl _body = new();
@@ -39,6 +38,7 @@ internal sealed class FilePreviewOverlay : ContentControl
     private ImageSource? _previewImageSource;
     private ScrollViewer? _imageScrollViewer;
     private double _imageScale = 1;
+    private double _maximumImageScale = 1;
     private bool _imageScaleInitialized;
     private string _originalText = string.Empty;
 
@@ -180,7 +180,7 @@ internal sealed class FilePreviewOverlay : ContentControl
                 HorizontalScroll = ScrollMode.Auto,
                 AutoHideScrollBars = true
             };
-            _imageScrollViewer.SizeChanged += _ => InitializeImageScaleToViewport();
+            _imageScrollViewer.SizeChanged += _ => UpdateImageScaleForViewport();
             _imageScrollViewer.MouseWheel += ZoomImage;
             _body.Content = new Border()
                 .Margin(16, 12)
@@ -201,24 +201,35 @@ internal sealed class FilePreviewOverlay : ContentControl
         }
     }
 
-    private void InitializeImageScaleToViewport()
+    private void UpdateImageScaleForViewport()
     {
-        if (_imageScaleInitialized || _previewImageSource is not { PixelWidth: > 0, PixelHeight: > 0 } source ||
+        if (_previewImageSource is not { PixelWidth: > 0, PixelHeight: > 0 } source ||
             _imageScrollViewer is not { ViewportWidth: > 0, ViewportHeight: > 0 } scrollViewer)
         {
             return;
         }
 
-        _imageScale = Math.Min(1, Math.Min(
+        var fitScale = Math.Min(
             scrollViewer.ViewportWidth / source.PixelWidth,
-            scrollViewer.ViewportHeight / source.PixelHeight));
+            scrollViewer.ViewportHeight / source.PixelHeight);
+        _maximumImageScale = fitScale > 1 ? fitScale : 1;
+        if (!_imageScaleInitialized)
+        {
+            _imageScale = Math.Min(1, fitScale);
+        }
+        else if (_imageScale > _maximumImageScale)
+        {
+            _imageScale = _maximumImageScale;
+        }
+
         _imageScaleInitialized = true;
         ApplyImageScale();
     }
 
     private void ZoomImage(MouseWheelEventArgs eventArgs)
     {
-        if (_previewImageSource is not { PixelWidth: > 0, PixelHeight: > 0 } || eventArgs.Delta.Y == 0)
+        if (_previewImageSource is not { PixelWidth: > 0, PixelHeight: > 0 } ||
+            _maximumImageScale <= 1 || eventArgs.Delta.Y == 0)
         {
             return;
         }
@@ -227,7 +238,7 @@ internal sealed class FilePreviewOverlay : ContentControl
         _imageScale = Math.Clamp(
             _imageScale * Math.Pow(ImageZoomStep, eventArgs.Delta.Y),
             MinimumImageScale,
-            MaximumImageScale);
+            _maximumImageScale);
         ApplyImageScale();
         eventArgs.Handled = true;
     }
@@ -247,7 +258,8 @@ internal sealed class FilePreviewOverlay : ContentControl
     private void UpdateImageStatus()
     {
         _status.Text = _previewImageSource is { PixelWidth: > 0, PixelHeight: > 0 } source
-            ? $"{source.PixelWidth} × {source.PixelHeight}  ·  {_imageScale:P0}  ·  滚轮缩放"
+            ? $"{source.PixelWidth} × {source.PixelHeight}  ·  {_imageScale:P0}" +
+              (_maximumImageScale > 1 ? "  ·  滚轮缩放" : string.Empty)
             : string.Empty;
     }
 

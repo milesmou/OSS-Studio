@@ -37,8 +37,8 @@ public sealed class OssMainWindow : Window
     private readonly ScrollViewer _bookmarkScrollViewer = new();
     private readonly TextBlock _bucketCountText = new();
     private readonly TextBlock _bookmarkCountText = new();
-    private readonly ContextMenu _bucketContextMenu = new();
-    private readonly ContextMenu _bookmarkContextMenu = new();
+    private ContextMenu? _bucketContextMenu;
+    private ContextMenu? _bookmarkContextMenu;
     private ContextMenu? _objectContextMenu;
     private readonly Grid _modalLayer = new();
     private readonly Dictionary<TabItem, string> _bucketIdsByTab = [];
@@ -98,11 +98,6 @@ public sealed class OssMainWindow : Window
         Padding = new Thickness(0);
         Background = palette.WindowBackground;
 
-        _bucketContextMenu
-            .Item("编辑资源桶", EditSelectedBucket)
-            .Separator()
-            .Item("删除资源桶", DeleteSelectedBucket);
-
         _bucketTree
             .ItemsSource(CreateBucketNodes())
             .OnSelectionChanged(OnBucketSelected)
@@ -118,16 +113,10 @@ public sealed class OssMainWindow : Window
                     _suppressBucketOpen = true;
                     _bucketTree.SelectedNode = node;
                     _suppressBucketOpen = false;
-                    _bucketContextMenu.ShowAt(_bucketTree, ScreenToClient(args.ScreenPosition));
+                    ShowBucketContextMenu(args);
                     args.Handled = true;
                 }
             });
-
-        _bookmarkContextMenu
-            .Item("打开书签", OpenSelectedBookmark)
-            .Item("自定义显示名称", CustomizeSelectedBookmarkName)
-            .Separator()
-            .Item("删除书签", DeleteSelectedBookmark);
 
         _bookmarkScrollViewer.Content = _bookmarkList;
         _bookmarkScrollViewer.HorizontalScroll = ScrollMode.Disabled;
@@ -307,6 +296,61 @@ public sealed class OssMainWindow : Window
         }
     }
 
+    private void ShowBucketContextMenu(MouseEventArgs args)
+    {
+        var bucket = GetSelectedBucket();
+        if (bucket is null)
+        {
+            return;
+        }
+
+        var index = _state.Buckets.FindIndex(item => item.Id == bucket.Id);
+        var menu = new ContextMenu()
+            .Item("编辑资源桶", EditSelectedBucket);
+        if (_state.Buckets.Count > 1)
+        {
+            menu.Separator();
+            if (index > 0)
+            {
+                menu.Item("上移", () => MoveSelectedBucket(-1));
+            }
+            if (index >= 0 && index < _state.Buckets.Count - 1)
+            {
+                menu.Item("下移", () => MoveSelectedBucket(1));
+            }
+        }
+        menu.Separator()
+            .Item("删除资源桶", DeleteSelectedBucket);
+
+        _bucketContextMenu = menu;
+        menu.ShowAt(_bucketTree, ScreenToClient(args.ScreenPosition));
+    }
+
+    private void MoveSelectedBucket(int offset)
+    {
+        var bucket = GetSelectedBucket();
+        if (bucket is null)
+        {
+            return;
+        }
+
+        var index = _state.Buckets.FindIndex(item => item.Id == bucket.Id);
+        var targetIndex = index + offset;
+        if (index < 0 || targetIndex < 0 || targetIndex >= _state.Buckets.Count)
+        {
+            return;
+        }
+
+        (_state.Buckets[index], _state.Buckets[targetIndex]) =
+            (_state.Buckets[targetIndex], _state.Buckets[index]);
+        _bucketTree.ItemsSource(CreateBucketNodes());
+        _suppressBucketOpen = true;
+        _bucketTree.SelectedNode = _bucketNodesById[bucket.Id];
+        _suppressBucketOpen = false;
+        SaveWorkspace();
+        SetStatus(bucket.Id, $"已{(offset < 0 ? "上移" : "下移")}资源桶：{bucket.Name}");
+    }
+
     private void OpenSelectedBookmark()
     {
         if (_selectedBookmark is { } bookmark)
@@ -416,6 +460,57 @@ public sealed class OssMainWindow : Window
         SetStatus("已删除书签");
     }
 
+    private void ShowBookmarkContextMenu(MouseEventArgs args)
+    {
+        if (_selectedBookmark is not { } bookmark)
+        {
+            return;
+        }
+
+        var index = _state.Bookmarks.FindIndex(item => item.Id == bookmark.Id);
+        var menu = new ContextMenu()
+            .Item("打开书签", OpenSelectedBookmark)
+            .Item("自定义显示名称", CustomizeSelectedBookmarkName);
+        if (_state.Bookmarks.Count > 1)
+        {
+            menu.Separator();
+            if (index > 0)
+            {
+                menu.Item("上移", () => MoveSelectedBookmark(-1));
+            }
+            if (index >= 0 && index < _state.Bookmarks.Count - 1)
+            {
+                menu.Item("下移", () => MoveSelectedBookmark(1));
+            }
+        }
+        menu.Separator()
+            .Item("删除书签", DeleteSelectedBookmark);
+
+        _bookmarkContextMenu = menu;
+        menu.ShowAt(_bookmarkScrollViewer, ScreenToClient(args.ScreenPosition));
+    }
+
+    private void MoveSelectedBookmark(int offset)
+    {
+        if (_selectedBookmark is not { } bookmark)
+        {
+            return;
+        }
+
+        var index = _state.Bookmarks.FindIndex(item => item.Id == bookmark.Id);
+        var targetIndex = index + offset;
+        if (index < 0 || targetIndex < 0 || targetIndex >= _state.Bookmarks.Count)
+        {
+            return;
+        }
+
+        (_state.Bookmarks[index], _state.Bookmarks[targetIndex]) =
+            (_state.Bookmarks[targetIndex], _state.Bookmarks[index]);
+        RefreshBookmarkTree();
+        SaveWorkspace();
+        SetStatus($"已{(offset < 0 ? "上移" : "下移")}书签");
+    }
+
     private async void CustomizeSelectedBookmarkName()
     {
         if (_selectedBookmark is not { } bookmark)
@@ -490,7 +585,7 @@ public sealed class OssMainWindow : Window
                 }
 
                 _selectedBookmark = bookmark;
-                _bookmarkContextMenu.ShowAt(_bookmarkScrollViewer, ScreenToClient(args.ScreenPosition));
+                ShowBookmarkContextMenu(args);
                 args.Handled = true;
             });
             _bookmarkList.Add(button);
