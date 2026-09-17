@@ -829,7 +829,8 @@ public sealed class OssMainWindow : Window
                         BrowserToolbarButton("✚ 创建目录", "在当前路径创建新目录", () => _ = CreateFolderAsync(bucket)),
                         BrowserToolbarButton("□ 全选", "选择或取消选择当前目录中的全部对象", () => ToggleAllObjects(bucket)),
                         BrowserToolbarButton("⇩ 下载", "下载当前选中的文件或目录", () => DownloadSelected(bucket.Id)),
-                        BrowserToolbarButton("▣ 复制", "复制当前选中的对象到其它 OSS 目录", () => _ = CopySelectedAsync(bucket.Id))),
+                        BrowserToolbarButton("▣ 复制", "复制当前选中的对象到其它 OSS 目录", () => _ = CopySelectedAsync(bucket.Id)),
+                        BrowserToolbarButton("删除", "删除当前勾选的所有文件或目录", () => DeleteSelected(bucket.Id))),
                 new Border(),
                 searchBox.Margin(8, 0, 0, 0).StretchHorizontal().CenterVertical()));
 
@@ -1461,7 +1462,7 @@ public sealed class OssMainWindow : Window
 
     private void DeleteSelected(string bucketId)
     {
-        var entries = GetActionEntries(bucketId);
+        var entries = GetCheckedEntries(bucketId);
         if (entries.Count > 1)
         {
             _ = DeleteEntriesAsync(bucketId, entries);
