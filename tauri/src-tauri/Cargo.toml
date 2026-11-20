@@ -1,0 +1,40 @@
+[package]
+name = "oss-studio"
+version = "1.0.0"
+description = "Aliyun OSS desktop client built with Tauri"
+authors = ["OSS Studio"]
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "oss_studio_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "oss-studio"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+futures-util = "0.3"
+hmac = "0.12"
+percent-encoding = "2"
+quick-xml = { version = "0.38", features = ["serialize"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json", "system-proxy"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha1 = "0.10"
+tauri = { version = "2", features = [] }
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-single-instance = "2"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "rt-multi-thread", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["io"] }
+walkdir = "2"
+
+[dev-dependencies]
+tempfile = "3"
