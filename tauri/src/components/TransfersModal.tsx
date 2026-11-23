@@ -1,9 +1,16 @@
 import { CircleCheck, CircleX, LoaderCircle, RotateCcw, X } from "lucide-react";
+import { uploadPercentage } from "../data";
 import type { TransferTask } from "../types";
 import { Modal } from "./Modal";
 
 function progress(task: TransferTask): number {
   if (task.State === "已完成") return 100;
+  if (task.UploadBytes) {
+    const { sent, total } = task.UploadBytes;
+    return total > 0
+      ? uploadPercentage(sent, total)
+      : uploadPercentage(task.Current, task.Total);
+  }
   if (!task.Total) return 0;
   return Math.max(0, Math.min(100, (task.Current * 100) / task.Total));
 }

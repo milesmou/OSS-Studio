@@ -1,5 +1,9 @@
 import type { BucketProfile, ObjectEntry } from "./types";
 
+export function uploadPercentage(current: number, total: number): number {
+  return total > 0 ? Math.min(99, Math.floor((current / total) * 100)) : 0;
+}
+
 export interface RegionOption {
   code: string;
   name: string;

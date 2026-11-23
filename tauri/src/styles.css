@@ -535,7 +535,7 @@ textarea {
   min-height: 0;
   flex: 1;
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr) 30px;
+  grid-template-rows: auto auto minmax(0, 1fr);
 }
 
 .navigation-bar,
@@ -814,9 +814,10 @@ input[type="checkbox"] {
 }
 
 .statusbar {
-  display: flex;
+  flex: 0 0 30px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: center;
-  justify-content: space-between;
   gap: 16px;
   padding: 0 14px;
   overflow: hidden;
@@ -828,9 +829,27 @@ input[type="checkbox"] {
   white-space: nowrap;
 }
 
-.statusbar span:first-child {
+.statusbar-objects,
+.statusbar-endpoint {
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.statusbar-objects {
+  grid-column: 1;
+}
+
+.statusbar-upload {
+  grid-column: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--teal);
+}
+
+.statusbar-endpoint {
+  grid-column: 3;
+  text-align: right;
 }
 
 .welcome {
@@ -1505,6 +1524,15 @@ input[type="checkbox"] {
   border-radius: inherit;
   background: var(--teal);
   transition: width 180ms ease;
+}
+
+.statusbar-progress {
+  width: 46px;
+  margin-top: 0;
+}
+
+.statusbar-progress .progress-value {
+  display: block;
 }
 
 .progress-value.error {

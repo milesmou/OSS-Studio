@@ -214,6 +214,15 @@ pub struct TransferProgress {
     pub current: usize,
     pub total: usize,
     pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upload_bytes: Option<UploadBytes>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadBytes {
+    pub sent: u64,
+    pub total: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]

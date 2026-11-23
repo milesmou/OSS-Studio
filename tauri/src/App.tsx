@@ -51,6 +51,7 @@ import {
   parentPrefix,
   regionName,
   selectedEntries,
+  uploadPercentage,
   validateFolderName,
   validateObjectName,
 } from "./data";
@@ -85,7 +86,6 @@ function createTab(bucket: BucketProfile): BucketTab {
     historyIndex: 0,
     items: [],
     loading: false,
-    status: "正在准备…",
     search: "",
     selectedKey: null,
     checkedKeys: new Set(),
@@ -316,7 +316,6 @@ export default function App() {
       items: [],
       selectedKey: null,
       checkedKeys: new Set(),
-      status: "正在从 OSS 加载对象列表…",
       refreshVersion: version,
     }));
     try {
@@ -330,10 +329,6 @@ export default function App() {
         ...current,
         loading: false,
         items: result.objects,
-        status:
-          result.objects.length === 0
-            ? "当前目录为空"
-            : `已加载 ${result.objects.length} 个对象`,
       }));
       if (result.endpointCorrected && workspaceRef.current) {
         commitWorkspace({
@@ -358,7 +353,6 @@ export default function App() {
         ...current,
         loading: false,
         items: [],
-        status: message,
       }));
       showToast(message, "error");
     }
@@ -423,7 +417,6 @@ export default function App() {
         items: [],
         selectedKey: null,
         checkedKeys: new Set(),
-        status: "正在从 OSS 加载对象列表…",
       };
     });
     void refreshTab(bucketId, target);
@@ -561,7 +554,6 @@ export default function App() {
           ...tab,
           checkedKeys: new Set(),
           selectedKey: null,
-          status: message,
         }));
       }
       if (descriptor.kind !== "download") void refreshTab(bucket.Id);
@@ -1138,12 +1130,13 @@ export default function App() {
       const payload = event.payload;
       commitTasks(
         tasksRef.current.map((task) =>
-          task.Id === payload.taskId
+          task.Id === payload.taskId && task.IsRunning
             ? {
                 ...task,
                 Current: payload.current,
                 Total: payload.total,
                 Detail: payload.name,
+                UploadBytes: payload.uploadBytes,
               }
             : task,
         ),
@@ -1226,6 +1219,37 @@ export default function App() {
     filteredItems.every((item) => activeTab?.checkedKeys.has(item.Key));
   const someChecked =
     filteredItems.some((item) => activeTab?.checkedKeys.has(item.Key)) && !allChecked;
+  const activeUploads = tasks.filter(
+    (task) => task.IsRunning && task.Descriptor.kind === "upload",
+  );
+  const currentUpload = activeUploads[0];
+  const cancelingUpload = activeUploads.length === 1 && currentUpload.State === "取消中";
+  let uploadPercent: number | undefined;
+  if (currentUpload && activeUploads.every((task) => task.UploadBytes)) {
+    let sentBytes = 0;
+    let totalBytes = 0;
+    let completedFiles = 0;
+    let totalFiles = 0;
+    for (const task of activeUploads) {
+      sentBytes += task.UploadBytes?.sent ?? 0;
+      totalBytes += task.UploadBytes?.total ?? 0;
+      completedFiles += task.Current;
+      totalFiles += task.Total;
+    }
+    uploadPercent =
+      totalBytes > 0
+        ? uploadPercentage(sentBytes, totalBytes)
+        : uploadPercentage(completedFiles, totalFiles);
+  }
+  let uploadStatus = "正在上传…";
+  const uploadLabel = uploadPercent === undefined ? "正在上传" : `上传 ${uploadPercent}%`;
+  if (activeUploads.length > 1) {
+    uploadStatus = `${uploadLabel} · ${activeUploads.length} 个任务`;
+  } else if (cancelingUpload) {
+    uploadStatus = "正在取消上传…";
+  } else if (currentUpload && currentUpload.Total > 0) {
+    uploadStatus = `${uploadLabel} · ${currentUpload.Current}/${currentUpload.Total} 个文件`;
+  }
   const isBookmarked =
     !!activeTab &&
     !!workspace?.Bookmarks.some(
@@ -1723,18 +1747,34 @@ export default function App() {
                   )}
                 </div>
               </div>
-
-              <div className="statusbar">
-                <span>{activeTab.status}</span>
-                <span>
+            </div>
+          )}
+          {((activeTab && activeBucket) || currentUpload) && (
+            <div className="statusbar">
+              {activeTab && activeBucket && (
+                <span className="statusbar-objects">
                   {filteredItems.length} / {activeTab.items.length} 个对象 ·{" "}
                   {activeTab.checkedKeys.size} 个已选
                 </span>
-                <span>
+              )}
+              {currentUpload && (
+                <span className="statusbar-upload" role="status">
+                  {uploadPercent !== undefined && !cancelingUpload ? (
+                    <span className="progress-track statusbar-progress" aria-hidden="true">
+                      <span className="progress-value" style={{ width: `${uploadPercent}%` }} />
+                    </span>
+                  ) : (
+                    <LoaderCircle size={13} className="spin" aria-hidden="true" />
+                  )}
+                  {uploadStatus}
+                </span>
+              )}
+              {activeTab && activeBucket && (
+                <span className="statusbar-endpoint">
                   {activeBucket.RegionName || activeBucket.RegionCode} ·{" "}
                   {activeBucket.UseHttps ? "HTTPS" : "HTTP"}
                 </span>
-              </div>
+              )}
             </div>
           )}
         </main>

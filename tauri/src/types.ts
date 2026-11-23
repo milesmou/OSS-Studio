@@ -72,6 +72,12 @@ export interface TransferProgress {
   current: number;
   total: number;
   name: string;
+  uploadBytes?: UploadBytes;
+}
+
+export interface UploadBytes {
+  sent: number;
+  total: number;
 }
 
 export interface DownloadResult {
@@ -98,7 +104,6 @@ export interface BucketTab {
   historyIndex: number;
   items: ObjectEntry[];
   loading: boolean;
-  status: string;
   search: string;
   selectedKey: string | null;
   checkedKeys: Set<string>;
@@ -125,6 +130,7 @@ export interface TransferTask {
   Title: string;
   Current: number;
   Total: number;
+  UploadBytes?: UploadBytes;
   Detail: string;
   State: "进行中" | "取消中" | "已完成" | "已取消" | "失败";
   IsRunning: boolean;

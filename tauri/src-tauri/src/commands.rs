@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::models::{
     BucketProfile, CopyResult, CredentialInput, DeleteResult, DownloadResult, ObjectEntry,
-    ObjectListResult, OssSettings, StoredCredential, TransferProgress, UploadResult,
+    ObjectListResult, OssSettings, StoredCredential, TransferProgress, UploadBytes, UploadResult,
     WorkspaceState,
 };
 use crate::oss::{text_content_type, OssClient};
@@ -97,6 +97,17 @@ fn client_for(bucket: BucketProfile, settings: OssSettings) -> Result<OssClient,
 }
 
 fn emit_progress(app: &AppHandle, task_id: &str, current: usize, total: usize, name: String) {
+    emit_transfer_progress(app, task_id, current, total, name, None);
+}
+
+fn emit_transfer_progress(
+    app: &AppHandle,
+    task_id: &str,
+    current: usize,
+    total: usize,
+    name: String,
+    upload_bytes: Option<UploadBytes>,
+) {
     let _ = app.emit(
         "transfer-progress",
         TransferProgress {
@@ -104,6 +115,7 @@ fn emit_progress(app: &AppHandle, task_id: &str, current: usize, total: usize, n
             current,
             total,
             name,
+            upload_bytes,
         },
     );
 }
@@ -159,11 +171,9 @@ pub async fn upload_paths(
     let token = state.begin(&task_id);
     let client = client_for(bucket, settings)?;
     let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
-    let event_app = app.clone();
-    let event_task = task_id.clone();
     client
-        .upload_paths(paths, &prefix, token, move |current, total, name| {
-            emit_progress(&event_app, &event_task, current, total, name);
+        .upload_paths(paths, &prefix, token, move |current, total, name, bytes| {
+            emit_transfer_progress(&app, &task_id, current, total, name, Some(bytes));
         })
         .await
         .map_err(canceled_error)

@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
@@ -13,7 +14,7 @@ use reqwest::header::{HeaderMap, HeaderValue, CONTENT_LENGTH, CONTENT_TYPE, DATE
 use reqwest::{Method, Response, StatusCode};
 use serde::Deserialize;
 use sha1::Sha1;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Semaphore;
 use tokio_util::io::ReaderStream;
 use tokio_util::sync::CancellationToken;
@@ -21,7 +22,7 @@ use walkdir::WalkDir;
 
 use crate::models::{
     normalize_prefix, BucketProfile, CopyResult, DeleteResult, DownloadResult, ObjectEntry,
-    ObjectListResult, OssSettings, StoredCredential, UploadResult,
+    ObjectListResult, OssSettings, StoredCredential, UploadBytes, UploadResult,
 };
 
 const MAX_KEYS: usize = 999;
@@ -99,7 +100,18 @@ pub struct OssClient {
 enum RequestBody {
     Empty,
     Bytes(Vec<u8>),
-    File { path: PathBuf, size: u64 },
+    File {
+        path: PathBuf,
+        size: u64,
+        on_bytes: Arc<dyn Fn(u64) + Send + Sync>,
+    },
+}
+
+struct UploadProgress {
+    bytes: UploadBytes,
+    file_bytes: Vec<u64>,
+    completed: usize,
+    last_update: Instant,
 }
 
 impl RequestBody {
@@ -492,16 +504,15 @@ impl OssClient {
         Ok(())
     }
 
-    pub async fn put_file(
+    async fn put_file(
         &self,
         key: &str,
-        path: &Path,
+        path: PathBuf,
+        size: u64,
         token: &CancellationToken,
+        on_bytes: impl Fn(u64) + Send + Sync + 'static,
     ) -> Result<(), String> {
-        let metadata = tokio::fs::metadata(path)
-            .await
-            .map_err(|error| format!("读取文件失败 {}：{error}", path.display()))?;
-        let content_type = content_type_for_path(path);
+        let content_type = content_type_for_path(&path);
         let response = self
             .send(
                 Method::PUT,
@@ -509,8 +520,9 @@ impl OssClient {
                 key,
                 &[],
                 RequestBody::File {
-                    path: path.to_path_buf(),
-                    size: metadata.len(),
+                    path,
+                    size,
+                    on_bytes: Arc::new(on_bytes),
                 },
                 token,
                 Some(content_type),
@@ -691,27 +703,75 @@ impl OssClient {
         paths: Vec<PathBuf>,
         prefix: &str,
         token: CancellationToken,
-        on_progress: impl Fn(usize, usize, String) + Send + Sync,
+        on_progress: impl Fn(usize, usize, String, UploadBytes) + Send + Sync + 'static,
     ) -> Result<UploadResult, String> {
-        let uploads = collect_uploads(prefix, &paths);
+        let prefix = prefix.to_owned();
+        let scan = tokio::task::spawn_blocking(move || {
+            collect_uploads(&prefix, &paths)
+                .into_iter()
+                .map(|(path, key)| {
+                    let size = std::fs::metadata(&path)
+                        .map(|metadata| metadata.len())
+                        .map_err(|error| format!("读取文件失败 {}：{error}", path.display()));
+                    (path, key, size)
+                })
+                .collect::<Vec<_>>()
+        });
+        let uploads = tokio::select! {
+            _ = token.cancelled() => return Err(CANCELED.into()),
+            result = scan => result.map_err(|error| format!("读取上传列表失败：{error}"))?,
+        };
         let total = uploads.len();
-        let completed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let bytes = UploadBytes {
+            sent: 0,
+            total: uploads
+                .iter()
+                .filter_map(|(_, _, size)| size.as_ref().ok())
+                .sum(),
+        };
+        on_progress(0, total, "正在上传…".into(), bytes);
+        let progress = Mutex::new(UploadProgress {
+            bytes,
+            file_bytes: vec![0; total],
+            completed: 0,
+            last_update: Instant::now(),
+        });
+        let report = Arc::new(move |index: usize, key: &str, sent: u64, finished: bool| {
+            let mut progress = progress.lock().unwrap();
+            let previous = std::mem::replace(&mut progress.file_bytes[index], sent);
+            progress.bytes.sent = progress.bytes.sent - previous + sent;
+            if finished {
+                progress.completed += 1;
+            }
+            if finished
+                || sent < previous
+                || (sent > previous && progress.bytes.sent == progress.bytes.total)
+                || progress.last_update.elapsed() >= Duration::from_millis(150)
+            {
+                progress.last_update = Instant::now();
+                on_progress(progress.completed, total, key.to_owned(), progress.bytes);
+            }
+        });
         let limit = self.settings.upload_concurrency;
         let mut results = stream::iter(uploads)
-            .map(|(path, key)| {
-                let client = self.clone();
+            .enumerate()
+            .map(|(index, (path, key, size))| {
                 let token = token.clone();
-                let completed = completed.clone();
-                let on_progress = &on_progress;
+                let report = Arc::clone(&report);
                 async move {
                     if token.is_cancelled() {
                         return Err(CANCELED.to_string());
                     }
-                    let result = client.put_file(&key, &path, &token).await;
+                    let size = size?;
+                    let report_bytes = Arc::clone(&report);
+                    let upload_key = key.clone();
+                    let result = self
+                        .put_file(&key, path, size, &token, move |sent| {
+                            report_bytes(index, &upload_key, sent, false);
+                        })
+                        .await;
                     if result.is_ok() {
-                        let current =
-                            completed.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-                        on_progress(current, total, key);
+                        report(index, &key, size, true);
                     }
                     result
                 }
@@ -1129,11 +1189,26 @@ impl OssClient {
         request = match body {
             RequestBody::Empty => request,
             RequestBody::Bytes(bytes) => request.body(bytes.clone()),
-            RequestBody::File { path, .. } => {
+            RequestBody::File {
+                path,
+                size,
+                on_bytes,
+            } => {
+                on_bytes(0);
                 let file = tokio::fs::File::open(path)
                     .await
                     .map_err(transport_failure)?;
-                request.body(reqwest::Body::wrap_stream(ReaderStream::new(file)))
+                let on_bytes = Arc::clone(on_bytes);
+                let mut sent = 0;
+                let stream =
+                    ReaderStream::with_capacity(file.take(*size), 64 * 1024).map(move |chunk| {
+                        if let Ok(bytes) = &chunk {
+                            sent += bytes.len() as u64;
+                            on_bytes(sent);
+                        }
+                        chunk
+                    });
+                request.body(reqwest::Body::wrap_stream(stream))
             }
         };
         tokio::select! {
@@ -1573,6 +1648,103 @@ struct CommonPrefix {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn upload_reports_bytes_during_request_and_resets_them_on_retry() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = listener.local_addr().unwrap().to_string();
+        let size = 12 * 1024 * 1024;
+        let server = std::thread::spawn(move || {
+            for status in ["500 Internal Server Error", "200 OK"] {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = BufReader::new(&mut socket);
+                let mut content_length = None;
+                loop {
+                    let mut header = String::new();
+                    assert_ne!(request.read_line(&mut header).unwrap(), 0);
+                    if header == "\r\n" {
+                        break;
+                    }
+                    if let Some(length) =
+                        header.to_ascii_lowercase().strip_prefix("content-length:")
+                    {
+                        content_length = Some(length.trim().parse::<u64>().unwrap());
+                    }
+                }
+                assert_eq!(content_length, Some(size));
+                // Stall the socket so the streaming progress timer can elapse.
+                std::thread::sleep(Duration::from_millis(300));
+                assert_eq!(
+                    std::io::copy(&mut request.take(size), &mut std::io::sink()).unwrap(),
+                    size
+                );
+                write!(
+                    socket,
+                    "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+                .unwrap();
+            }
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("upload.bin");
+        std::fs::File::create(&path).unwrap().set_len(size).unwrap();
+        let client = OssClient {
+            bucket: BucketProfile {
+                name: "demo".into(),
+                endpoint,
+                endpoint_mode: "Cname".into(),
+                use_https: false,
+                ..Default::default()
+            },
+            credential: StoredCredential {
+                access_key_id: "test-id".into(),
+                access_key_secret: "test-secret".into(),
+            },
+            settings: OssSettings {
+                retry_count: 1,
+                ..Default::default()
+            },
+            http: reqwest::Client::builder()
+                .no_proxy()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap(),
+        };
+        let updates = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&updates);
+        let result = client
+            .upload_paths(
+                vec![path],
+                "",
+                CancellationToken::new(),
+                move |completed, _, _, bytes| {
+                    captured
+                        .lock()
+                        .unwrap()
+                        .push((completed, bytes.sent, bytes.total));
+                },
+            )
+            .await
+            .unwrap();
+        server.join().unwrap();
+
+        let updates = updates.lock().unwrap();
+        assert_eq!(result.file_count, 1);
+        assert_eq!(updates.first(), Some(&(0, 0, size)));
+        assert!(updates
+            .iter()
+            .any(|&(completed, sent, _)| completed == 0 && sent > 0 && sent < size));
+        assert!(updates
+            .windows(2)
+            .any(|pair| pair == [(0, size, size), (0, 0, size)]));
+        assert_eq!(updates.last(), Some(&(1, size, size)));
+    }
 
     #[test]
     fn encodes_object_keys_without_double_encoding() {
