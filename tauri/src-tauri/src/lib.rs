@@ -3,6 +3,22 @@ mod models;
 mod oss;
 mod storage;
 
+use tauri::{webview::Color, Theme, WebviewWindowBuilder};
+
+fn system_uses_dark_theme() -> bool {
+    #[cfg(windows)]
+    {
+        windows_registry::CURRENT_USER
+            .open(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
+            .and_then(|key| key.get_u32("AppsUseLightTheme"))
+            .is_ok_and(|light| light == 0)
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -17,6 +33,48 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .setup(|app| {
+            let workspace = storage::WorkspaceStore::new().load();
+            let window_theme = match workspace.theme_mode.as_str() {
+                "System" => None,
+                "Dark" => Some(Theme::Dark),
+                _ => Some(Theme::Light),
+            };
+            let dark = match window_theme {
+                Some(theme) => theme == Theme::Dark,
+                None => system_uses_dark_theme(),
+            };
+            // Match the --window colors in styles.css before the page loads.
+            let (theme, background) = if dark {
+                ("dark", Color(9, 20, 22, 255))
+            } else {
+                ("light", Color(234, 241, 237, 255))
+            };
+            let startup_script = format!(
+                r#"(() => {{
+                    const applyTheme = () => {{
+                        document.documentElement.dataset.theme = '{theme}';
+                    }};
+                    if (document.documentElement) {{
+                        applyTheme();
+                    }} else {{
+                        const observer = new MutationObserver(() => {{
+                            if (!document.documentElement) return;
+                            observer.disconnect();
+                            applyTheme();
+                        }});
+                        observer.observe(document, {{ childList: true }});
+                    }}
+                }})();"#
+            );
+
+            WebviewWindowBuilder::from_config(app, &app.config().app.windows[0])?
+                .theme(window_theme)
+                .background_color(background)
+                .initialization_script(startup_script)
+                .build()?;
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::load_workspace,
             commands::save_workspace,

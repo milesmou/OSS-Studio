@@ -12,13 +12,13 @@
   "app": {
     "windows": [
       {
+        "create": false,
         "title": "OSS Studio",
         "width": 1180,
         "height": 760,
         "minWidth": 900,
         "minHeight": 620,
         "center": true,
-        "theme": "Light",
         "resizable": true,
         "fullscreen": false
       }

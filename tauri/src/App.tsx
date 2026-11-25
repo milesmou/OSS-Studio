@@ -245,7 +245,9 @@ export default function App() {
     y: number;
     items: MenuItem[];
   } | null>(null);
-  const [systemDark, setSystemDark] = useState(false);
+  const [systemDark, setSystemDark] = useState(
+    () => window.matchMedia("(prefers-color-scheme: dark)").matches,
+  );
 
   const workspaceRef = useRef<WorkspaceState | null>(null);
   const tabsRef = useRef<BucketTab[]>([]);
@@ -1115,14 +1117,16 @@ export default function App() {
     return () => media.removeEventListener("change", update);
   }, []);
 
+  const themeMode = workspace?.ThemeMode;
   useEffect(() => {
-    const mode = workspace?.ThemeMode ?? "Light";
-    const theme = mode === "System" ? (systemDark ? "dark" : "light") : mode.toLowerCase();
+    if (!themeMode) return;
+    const dark = themeMode === "System" ? systemDark : themeMode === "Dark";
+    const theme = dark ? "dark" : "light";
     document.documentElement.dataset.theme = theme;
     void getCurrentWindow()
-      .setTheme(theme as "light" | "dark")
+      .setTheme(themeMode === "System" ? null : theme)
       .catch(() => undefined);
-  }, [workspace?.ThemeMode, systemDark]);
+  }, [themeMode, systemDark]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
